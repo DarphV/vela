@@ -774,7 +774,7 @@ def owner_app_record():
     )
 
 
-def poll():
+def poll(version=None):
     query = urllib.parse.urlencode({"filter[bundleId]": BUNDLE_ID, "limit": "5"})
     status, payload = api("GET", "/v1/apps?" + query)
     if status >= 400:
@@ -786,9 +786,11 @@ def poll():
         owner_app_record()
         return 1
     app_id = apps[0]["id"]
-    version = env("GITHUB_RUN_NUMBER").strip()
+    explicit = bool(version)
+    version = (version or env("GITHUB_RUN_NUMBER")).strip()
     print(f"App record exists. Waiting for build {version} to appear in TestFlight processing.")
-    deadline = time.time() + 15 * 60
+    # A named build is a status check and should wait until Apple finishes.
+    deadline = time.time() + (45 if explicit else 15) * 60
     while time.time() < deadline:
         query = urllib.parse.urlencode({
             "filter[app]": app_id,
@@ -810,6 +812,9 @@ def poll():
         else:
             print("Build not listed yet.")
         time.sleep(30)
+    if explicit:
+        print(f"TestFlight build {version} was still processing when the wait ended.")
+        return 1
     print("Upload was accepted. Apple is still processing the build for TestFlight.")
     return 0
 
@@ -845,7 +850,8 @@ def main():
     elif command == "create-cert":
         create_signing_cert()
     elif command == "poll":
-        raise SystemExit(poll())
+        version = sys.argv[2] if len(sys.argv) > 2 else None
+        raise SystemExit(poll(version))
     elif command == "scrub" and len(sys.argv) == 3:
         scrub(sys.argv[2])
     elif command == "owner-app":
