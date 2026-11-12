@@ -7,6 +7,10 @@ on:
   push:
     branches: [main, master]
   pull_request:
+    # This status-check branch must not archive or upload. The path does not
+    # exist, so opening its pull request skips this workflow.
+    paths:
+      - "do-not-build-on-this-status-branch/**"
   workflow_dispatch:
 
 concurrency:

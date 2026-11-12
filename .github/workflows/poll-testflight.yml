@@ -1,0 +1,21 @@
+# Read-only check for an already uploaded TestFlight build.
+# Does not create certificates, profiles, or a new upload.
+name: Poll TestFlight
+
+on:
+  pull_request:
+
+jobs:
+  poll:
+    name: Build 25 status
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait until upload 25 is VALID
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: python3 scripts/asc_testflight.py watch-upload 25
