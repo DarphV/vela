@@ -79,9 +79,9 @@ final class KnowledgeIndex {
         FROM documents d ORDER BY d.created DESC
         """, read: { statement in
             rows.append(StoredDocument(
-                id: text(statement, 0),
-                name: text(statement, 1),
-                filename: text(statement, 2),
+                id: self.text(statement, 0),
+                name: self.text(statement, 1),
+                filename: self.text(statement, 2),
                 pageCount: Int(sqlite3_column_int(statement, 3)),
                 chunkCount: Int(sqlite3_column_int(statement, 4))
             ))
@@ -96,14 +96,14 @@ final class KnowledgeIndex {
         FROM chunks c JOIN documents d ON d.id = c.document_id
         """, read: { statement in
             rows.append(StoredChunk(
-                id: text(statement, 0),
-                documentID: text(statement, 1),
-                documentName: text(statement, 2),
-                filename: text(statement, 3),
+                id: self.text(statement, 0),
+                documentID: self.text(statement, 1),
+                documentName: self.text(statement, 2),
+                filename: self.text(statement, 3),
                 page: Int(sqlite3_column_int(statement, 4)),
-                heading: text(statement, 5),
-                text: text(statement, 6),
-                embedding: floats(statement, 7)
+                heading: self.text(statement, 5),
+                text: self.text(statement, 6),
+                embedding: self.floats(statement, 7)
             ))
         })
         return rows
@@ -112,7 +112,7 @@ final class KnowledgeIndex {
     func facts() throws -> [StoredFact] {
         var rows: [StoredFact] = []
         try query("SELECT id, text FROM facts ORDER BY created DESC", read: { statement in
-            rows.append(StoredFact(id: text(statement, 0), text: text(statement, 1)))
+            rows.append(StoredFact(id: self.text(statement, 0), text: self.text(statement, 1)))
         })
         return rows
     }
@@ -121,20 +121,20 @@ final class KnowledgeIndex {
         try exec("BEGIN")
         do {
             try run("INSERT INTO documents (id, name, filename, page_count, created) VALUES (?, ?, ?, ?, ?)") { statement in
-                bind(statement, 1, document.id)
-                bind(statement, 2, document.name)
-                bind(statement, 3, document.filename)
+                self.bind(statement, 1, document.id)
+                self.bind(statement, 2, document.name)
+                self.bind(statement, 3, document.filename)
                 sqlite3_bind_int(statement, 4, Int32(document.pageCount))
                 sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970)
             }
             for chunk in chunks {
                 try run("INSERT INTO chunks (id, document_id, page, heading, text, embedding) VALUES (?, ?, ?, ?, ?, ?)") { statement in
-                    bind(statement, 1, chunk.id)
-                    bind(statement, 2, document.id)
+                    self.bind(statement, 1, chunk.id)
+                    self.bind(statement, 2, document.id)
                     sqlite3_bind_int(statement, 3, Int32(chunk.page))
-                    bind(statement, 4, chunk.heading)
-                    bind(statement, 5, chunk.text)
-                    bind(statement, 6, chunk.embedding)
+                    self.bind(statement, 4, chunk.heading)
+                    self.bind(statement, 5, chunk.text)
+                    self.bind(statement, 6, chunk.embedding)
                 }
             }
             try exec("COMMIT")
@@ -146,31 +146,31 @@ final class KnowledgeIndex {
 
     func deleteDocument(id: String) throws {
         try run("DELETE FROM documents WHERE id = ?") { statement in
-            bind(statement, 1, id)
+            self.bind(statement, 1, id)
         }
     }
 
     func filename(for id: String) throws -> String? {
         var name: String?
         try query("SELECT filename FROM documents WHERE id = ?") { statement in
-            bind(statement, 1, id)
+            self.bind(statement, 1, id)
         } read: { statement in
-            name = text(statement, 0)
+            name = self.text(statement, 0)
         }
         return name
     }
 
     func insertFact(id: String, text: String) throws {
         try run("INSERT INTO facts (id, text, created) VALUES (?, ?, ?)") { statement in
-            bind(statement, 1, id)
-            bind(statement, 2, text)
+            self.bind(statement, 1, id)
+            self.bind(statement, 2, text)
             sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
         }
     }
 
     func deleteFact(id: String) throws {
         try run("DELETE FROM facts WHERE id = ?") { statement in
-            bind(statement, 1, id)
+            self.bind(statement, 1, id)
         }
     }
 
@@ -206,7 +206,7 @@ final class KnowledgeIndex {
     }
 
     private func bind(_ statement: OpaquePointer, _ index: Int32, _ value: String) {
-        sqlite3_bind_text(statement, index, value, -1, transient)
+        sqlite3_bind_self.text(statement, index, value, -1, transient)
     }
 
     private func bind(_ statement: OpaquePointer, _ index: Int32, _ values: [Float]) {
@@ -220,7 +220,7 @@ final class KnowledgeIndex {
     }
 
     private func text(_ statement: OpaquePointer, _ index: Int32) -> String {
-        guard let cString = sqlite3_column_text(statement, index) else { return "" }
+        guard let cString = sqlite3_column_self.text(statement, index) else { return "" }
         return String(cString: cString)
     }
 

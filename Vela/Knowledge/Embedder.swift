@@ -29,19 +29,11 @@ enum Embedder {
             guard dimension > 0 else { return nil }
             var sum = [Double](repeating: 0, count: dimension)
             var samples = 0
-            let step = max(1, text.count / 10)
-            var cursor = text.startIndex
-            var seen = 0
-            while cursor < text.endIndex {
-                if seen % step == 0 {
-                    let sample = result.embedding(at: cursor)
-                    if sample.count == dimension {
-                        for i in 0..<dimension { sum[i] += sample[i] }
-                        samples += 1
-                    }
-                }
-                cursor = text.index(after: cursor)
-                seen += 1
+            result.enumerateTokenVectors(in: result.string.startIndex..<result.string.endIndex) { vector, _ in
+                guard vector.count == dimension else { return true }
+                for i in 0..<dimension { sum[i] += vector[i] }
+                samples += 1
+                return samples < 80
             }
             guard samples > 0 else { return nil }
             return sum.map { Float($0 / Double(samples)) }
