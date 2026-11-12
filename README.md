@@ -51,14 +51,15 @@ vela-ios/
    **ohne Signatur**.
 3. Nach ca. 5–10 Minuten unter dem Lauf bei **Artifacts** `Vela-unsigned-ipa` herunterladen und
    entpacken → `Vela-unsigned.ipa`.
-4. Derselbe Workflow startet parallel **Vela (TestFlight)**. Der Job signiert in der Cloud
-   mit den Secrets `ASC_ISSUER_ID`, `ASC_KEY_ID` und `ASC_PRIVATE_KEY` (komplette `.p8`)
-   und lädt nach App Store Connect hoch. Die Build-Nummer ist `github.run_number`,
-   die Bundle-ID `de.barczewski.vela` (App Intents ohne eigene Extension).
-   `ITSAppUsesNonExemptEncryption` ist aus. Fehlt der App-Eintrag, in App Store Connect
-   eine App anlegen: Name **Vela**, Bundle-ID **de.barczewski.vela**, SKU **vela**.
-   Kann die Team-ID nicht aus dem Schlüssel gelesen werden, zusätzlich das Secret
-   `DEVELOPMENT_TEAM` (10 Zeichen, Mitgliedschaft) setzen.
+4. Derselbe Workflow startet parallel **Vela (TestFlight)**. Der Job signiert mit einem
+   gespeicherten Distribution-Zertifikat (`VELA_DIST_P12_BASE64` und `VELA_DIST_P12_PASSWORD`)
+   und lädt nach App Store Connect hoch. Er legt keine Zertifikate an und widerruft keine.
+   Einmalig legt **Actions › Create signing cert** das Zertifikat an, aber nur wenn noch
+   Platz unter Apples Limit von drei Apple-Distribution-Zertifikaten ist. Dafür braucht das
+   Repository das Secret `GH_SECRETS_TOKEN` (fein granuliertes PAT, Secrets lesen/schreiben
+   auf `DarphV/vela`) plus `ASC_ISSUER_ID`, `ASC_KEY_ID` und `ASC_PRIVATE_KEY`.
+   Die Build-Nummer ist `github.run_number`, die Bundle-ID `de.barczewski.vela`.
+   Der Name auf dem Home-Bildschirm bleibt **Vela**. `ITSAppUsesNonExemptEncryption` ist aus.
 
 ## Auf das iPhone bringen (Sideloadly, kostenlose Apple-ID)
 

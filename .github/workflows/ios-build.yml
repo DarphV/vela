@@ -159,7 +159,6 @@ jobs:
           DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
           VELA_DIST_P12_BASE64: ${{ secrets.VELA_DIST_P12_BASE64 }}
           VELA_DIST_P12_PASSWORD: ${{ secrets.VELA_DIST_P12_PASSWORD }}
-          GH_TOKEN: ${{ github.token }}
         run: bash scripts/asc-testflight.sh
 
       - name: TestFlight-Log bei Fehler hochladen

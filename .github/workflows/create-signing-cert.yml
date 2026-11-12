@@ -1,0 +1,24 @@
+# Einmalig: legt ein Apple-Distribution-Zertifikat an und speichert das .p12
+# als Repository-Secret. Widerruft nie ein Zertifikat.
+name: Create signing cert
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create-signing-cert:
+    name: create-signing-cert
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zertifikat anlegen und als Secret speichern
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          GH_SECRETS_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+          VELA_DIST_P12_BASE64: ${{ secrets.VELA_DIST_P12_BASE64 }}
+          VELA_DIST_P12_PASSWORD: ${{ secrets.VELA_DIST_P12_PASSWORD }}
+        run: bash scripts/create-signing-cert.sh

@@ -21,6 +21,8 @@ BUNDLE_ID = "de.barczewski.vela"
 APP_NAME = "Vela"
 APP_SKU = "vela"
 API = "https://api.appstoreconnect.apple.com"
+# Apple allows three Apple Distribution certificates. A lower effective limit is handled when the API refuses.
+DISTRIBUTION_LIMIT = 3
 
 
 def env(name):
@@ -310,7 +312,7 @@ def distribution_certificates():
     if status >= 400:
         print("Certificates could not be listed.")
         print(error_text(json.dumps(payload).encode()))
-        return []
+        return None
     found = []
     for item in payload.get("data") or []:
         kind = ((item.get("attributes") or {}).get("certificateType") or "").upper()
@@ -334,15 +336,29 @@ def certificate_serial(pem):
     return text.upper().lstrip("0")
 
 
+def secrets_env():
+    token = env("GH_SECRETS_TOKEN").strip()
+    if not token:
+        return None
+    child = os.environ.copy()
+    child["GH_TOKEN"] = token
+    return child
+
+
 def remember_signing_secret(name, path):
     """Store a secret for the next run. The file contents are never printed."""
     repo = os.environ.get("GITHUB_REPOSITORY") or "DarphV/vela"
+    child = secrets_env()
+    if child is None:
+        print("GH_SECRETS_TOKEN is not set, so the p12 cannot be stored.")
+        return False
     with open(path, "rb") as handle:
         stored = subprocess.run(
             ["gh", "secret", "set", name, "--repo", repo],
             stdin=handle,
             capture_output=True,
             check=False,
+            env=child,
         )
     if stored.returncode != 0:
         detail = stored.stderr.decode("utf-8", errors="replace")
@@ -501,7 +517,10 @@ def issue_app_store_signing(team):
     cert_id = None
     if reused:
         serial = certificate_serial(reused)
-        for item in distribution_certificates():
+        listed = distribution_certificates()
+        if listed is None:
+            fail("Could not list certificates. Nothing was revoked.")
+        for item in listed:
             raw = ((item.get("attributes") or {}).get("serialNumber") or "").upper().lstrip("0")
             if serial and raw == serial:
                 cert_id = item.get("id")
@@ -517,60 +536,15 @@ def issue_app_store_signing(team):
                 "This workflow will not revoke anything and will not create a replacement over a saved key."
             )
     else:
-        if distribution_certificates():
-            print("Existing distribution certificates stay on the account. Creating one CI certificate and saving its private key.")
-        work = env("ASC_DIR")
-        key_path = os.path.join(work, "dist.key")
-        csr_path = os.path.join(work, "dist.csr")
-        created = subprocess.run(
-            [
-                "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
-                "-keyout", key_path, "-out", csr_path,
-                "-subj", "/CN=Vela CI Distribution",
-            ],
-            capture_output=True,
-            check=False,
+        fail(
+            "No saved distribution certificate (VELA_DIST_P12_BASE64 / VELA_DIST_P12_PASSWORD).\n"
+            "OWNER ACTION, from the iPhone:\n"
+            "1. Create a fine-grained GitHub token with Secrets read and write on DarphV/vela, and save it as the secret GH_SECRETS_TOKEN.\n"
+            "2. If the account is already full, revoke one old Apple Distribution certificate yourself in the developer portal.\n"
+            "3. Actions → Create signing cert → Run workflow.\n"
+            "4. Re-run iOS Build.\n"
+            "This release job does not create or revoke certificates."
         )
-        if created.returncode != 0:
-            fail("Could not create a certificate request for App Store signing.")
-        os.chmod(key_path, 0o600)
-        with open(csr_path, "r", encoding="ascii") as handle:
-            csr = handle.read()
-        status, payload = api("POST", "/v1/certificates", {
-            "data": {
-                "type": "certificates",
-                "attributes": {"certificateType": "DISTRIBUTION", "csrContent": csr},
-            }
-        })
-        if status >= 400:
-            print(error_text(json.dumps(payload).encode()))
-            fail(
-                "Could not create an Apple Distribution certificate.\n"
-                "Existing certificates were left in place. This workflow does not revoke them."
-            )
-        issued = payload.get("data") or {}
-        cert_id = issued.get("id")
-        content = (issued.get("attributes") or {}).get("certificateContent")
-        if not cert_id or not content:
-            fail("App Store Connect did not return the new distribution certificate.")
-        der = base64.b64decode(content)
-        pem = subprocess.run(
-            ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
-            input=der,
-            capture_output=True,
-            check=False,
-        )
-        if pem.returncode != 0:
-            fail("Could not read the distribution certificate.")
-        learned = team_in_text((issued.get("attributes") or {}).get("name") or "") or team_from_certificate(content)
-        if learned:
-            team = learned
-        password = base64.b64encode(os.urandom(18)).decode("ascii")
-        write_p12(key_path, pem.stdout, password)
-        try:
-            os.remove(key_path)
-        except OSError:
-            pass
     existing = profile_for_certificate(cert_id, team)
     if existing:
         install_profile(existing[0], existing[1])
@@ -637,6 +611,130 @@ def patch_app_signing(team, profile_name):
     with open(path, "w", encoding="utf-8") as handle:
         handle.write("".join(rebuilt))
     print(f"App target uses the App Store profile ({patched} configuration(s)).")
+
+
+def describe_distribution_certificates(certs):
+    print("This job did not revoke any certificate.")
+    if certs is None:
+        print("The certificate list could not be read.")
+        return
+    print(f"Apple allows {DISTRIBUTION_LIMIT} Apple Distribution certificates. This account has {len(certs)}.")
+    print("Revoke one yourself, then run Create signing cert again:")
+    print("https://developer.apple.com/account/resources/certificates/list")
+    if not certs:
+        print("No distribution certificates are listed.")
+        return
+    for index, item in enumerate(certs, 1):
+        attrs = item.get("attributes") or {}
+        print(f"{index}. {attrs.get('name') or 'Apple Distribution'}")
+        print(f"   expires: {attrs.get('expirationDate') or 'unknown'}")
+        print(f"   serial: {attrs.get('serialNumber') or 'unknown'}")
+        print(f"   id: {item.get('id') or 'unknown'}")
+
+
+def saved_certificate_is_current(certs):
+    if not env("VELA_DIST_P12_BASE64").strip() or not env("VELA_DIST_P12_PASSWORD"):
+        return False
+    pem = reuse_saved_p12()
+    if not pem:
+        return False
+    serial = certificate_serial(pem)
+    for item in certs:
+        raw = ((item.get("attributes") or {}).get("serialNumber") or "").upper().lstrip("0")
+        if serial and raw == serial:
+            print("The saved certificate is still on the Apple account. Nothing new was created.")
+            return True
+    print("The saved certificate is no longer on the Apple account.")
+    return False
+
+
+def assert_can_store_secrets():
+    child = secrets_env()
+    if child is None:
+        fail(
+            "GH_SECRETS_TOKEN is missing. Add a fine-grained PAT with Secrets read and write on DarphV/vela.\n"
+            "No certificate was created."
+        )
+    repo = os.environ.get("GITHUB_REPOSITORY") or "DarphV/vela"
+    listed = subprocess.run(
+        ["gh", "secret", "list", "--repo", repo],
+        capture_output=True,
+        check=False,
+        env=child,
+    )
+    if listed.returncode != 0:
+        detail = re.sub(r"[A-Za-z0-9+/=]{24,}", "***", listed.stderr.decode("utf-8", errors="replace"))
+        fail("GH_SECRETS_TOKEN cannot read repository secrets. No certificate was created.\n" + detail.strip()[:300])
+
+
+def create_signing_cert():
+    """One-time certificate creation. Never deletes or revokes anything."""
+    write_key()
+    assert_can_store_secrets()
+    certs = distribution_certificates()
+    if certs is None:
+        fail("Could not list certificates. Nothing was created or revoked.")
+    if saved_certificate_is_current(certs):
+        return
+    if len(certs) >= DISTRIBUTION_LIMIT:
+        describe_distribution_certificates(certs)
+        fail(f"Already at the Apple Distribution limit ({DISTRIBUTION_LIMIT}). No certificate was created.")
+    work = env("ASC_DIR")
+    key_path = os.path.join(work, "dist.key")
+    csr_path = os.path.join(work, "dist.csr")
+    created = subprocess.run(
+        [
+            "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", key_path, "-out", csr_path,
+            "-subj", "/CN=Vela CI Distribution",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if created.returncode != 0:
+        fail("Could not create a certificate request. No certificate was created.")
+    os.chmod(key_path, 0o600)
+    with open(csr_path, "r", encoding="ascii") as handle:
+        csr = handle.read()
+    status, payload = api("POST", "/v1/certificates", {
+        "data": {
+            "type": "certificates",
+            "attributes": {"certificateType": "DISTRIBUTION", "csrContent": csr},
+        }
+    })
+    if status >= 400:
+        print(error_text(json.dumps(payload).encode()))
+        describe_distribution_certificates(distribution_certificates())
+        fail("Apple did not issue a certificate. Nothing was revoked.")
+    issued = payload.get("data") or {}
+    content = (issued.get("attributes") or {}).get("certificateContent")
+    if not content:
+        fail("App Store Connect did not return the new certificate. Nothing was revoked.")
+    pem = subprocess.run(
+        ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
+        input=base64.b64decode(content),
+        capture_output=True,
+        check=False,
+    )
+    if pem.returncode != 0:
+        fail("Could not read the new certificate. Nothing was revoked.")
+    password = base64.b64encode(os.urandom(18)).decode("ascii")
+    if not write_p12(key_path, pem.stdout, password):
+        attrs = issued.get("attributes") or {}
+        fail(
+            "The certificate was created, but the private key could not be saved.\n"
+            "Revoke that newest Apple Distribution certificate yourself, fix GH_SECRETS_TOKEN, and run this workflow again.\n"
+            f"Name: {attrs.get('name') or 'Apple Distribution'}\n"
+            f"Expires: {attrs.get('expirationDate') or 'unknown'}\n"
+            f"Serial: {attrs.get('serialNumber') or 'unknown'}\n"
+            "https://developer.apple.com/account/resources/certificates/list\n"
+            "This job will not revoke it."
+        )
+    try:
+        os.remove(key_path)
+    except OSError:
+        pass
+    print("Distribution certificate stored for TestFlight. The private key was not printed.")
 
 
 def prepare():
@@ -716,6 +814,7 @@ def scrub(path):
         env("ASC_ISSUER_ID"),
         env("VELA_DIST_P12_BASE64"),
         env("VELA_DIST_P12_PASSWORD"),
+        env("GH_SECRETS_TOKEN"),
     ]
     for secret in secrets:
         if not secret:
@@ -732,6 +831,8 @@ def main():
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "prepare":
         prepare()
+    elif command == "create-cert":
+        create_signing_cert()
     elif command == "poll":
         raise SystemExit(poll())
     elif command == "scrub" and len(sys.argv) == 3:
@@ -740,7 +841,7 @@ def main():
         owner_app_record()
         raise SystemExit(1)
     else:
-        fail("usage: asc_testflight.py prepare|poll|scrub <log>|owner-app")
+        fail("usage: asc_testflight.py prepare|create-cert|poll|scrub <log>|owner-app")
 
 
 if __name__ == "__main__":
