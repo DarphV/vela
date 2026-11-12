@@ -1,0 +1,32 @@
+# Reads TestFlight crash feedback for Vela. Does not create or revoke certificates.
+name: Fetch TestFlight crash
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  crash-logs:
+    name: crash-logs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: TestFlight-Absturzberichte lesen
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: bash scripts/fetch-crash.sh
+
+      - name: Crash-Logs hochladen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testflight-crash-logs
+          path: |
+            crash-logs/
+            crash-fetch.log
+          if-no-files-found: ignore
+          retention-days: 5
