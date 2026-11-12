@@ -31,7 +31,7 @@ struct VoiceModeView: View {
                 .allowsHitTesting(false)
 
             Text(model.subline)
-                .font(.system(size: 12.5))
+                .velaText(12.5)
                 .tracking(0.3)
                 .foregroundStyle(.white.opacity(0.38))
                 .multilineTextAlignment(.center)
@@ -46,7 +46,7 @@ struct VoiceModeView: View {
                 model.toggleMic()
             } label: {
                 Image(systemName: model.micEnabled ? "mic" : "mic.slash")
-                    .font(.system(size: 18, weight: .regular))
+                    .velaText(18, weight: .regular)
                     .foregroundStyle(.white.opacity(model.micEnabled ? 1 : 0.75))
                     .frame(width: 46, height: 46)
                     .velaChip(Circle(), highlighted: model.micEnabled && model.state == .listening)
@@ -74,7 +74,7 @@ private struct StatusLine: View {
                 .transition(.opacity.combined(with: .offset(y: 6)))
             PulsingDots()
         }
-        .font(.system(size: 38, weight: .thin))
+        .velaText(38, weight: .thin)
         .tracking(-0.2)
         .shadow(color: Color.rgba(160, 120, 255, 0.25), radius: 15)
         .animation(.easeInOut(duration: 0.35), value: state)
@@ -117,14 +117,14 @@ private struct HintRow: View {
             LinearGradient(colors: [.clear, .white.opacity(0.22)], startPoint: .leading, endPoint: .trailing)
                 .frame(width: 64, height: 1)
             Text("Tippen für Textmodus")
-                .font(.system(size: 14))
+                .velaText(14)
                 .tracking(0.2)
                 .foregroundStyle(.white.opacity(0.5))
             LinearGradient(colors: [.white.opacity(0.22), .clear], startPoint: .leading, endPoint: .trailing)
                 .frame(width: 64, height: 1)
         }
         Image(systemName: "chevron.down")
-            .font(.system(size: 12, weight: .semibold))
+            .velaText(12, weight: .semibold)
             .foregroundStyle(Color.rgba(183, 155, 255).opacity(0.65))
             .offset(y: bob ? 3 : 0)
             .onAppear {

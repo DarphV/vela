@@ -16,6 +16,10 @@ struct VelaSource: Identifiable, Hashable {
     let location: String
     /// Quoted excerpt. Text between `==` markers is highlighted.
     let excerpt: String
+    /// Local copy, when the source is a real imported file.
+    var fileURL: URL? = nil
+    /// 1-based PDF page.
+    var page: Int? = nil
 }
 
 /// Rich answer content. Strings support inline Markdown (**fett**).
@@ -38,8 +42,8 @@ struct ChatMessage: Identifiable, Hashable {
 
     let id: UUID
     let role: Role
-    let text: String
-    let answer: VelaAnswer?
+    var text: String
+    var answer: VelaAnswer?
     let date: Date
 
     static func user(_ text: String, date: Date = Date()) -> ChatMessage {

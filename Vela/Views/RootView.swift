@@ -46,6 +46,7 @@ struct RootView: View {
 
     @State private var stageOpacity: Double = 1
     @State private var topInset: CGFloat = 59
+    @Namespace private var orbSpace
 
     private var isChat: Bool { model.mode == .chat }
     private var modeAnimation: Animation {
@@ -77,6 +78,7 @@ struct RootView: View {
                         }
 
                     stage(L)
+                    travelRing(L)
                     avatarRing(L)
 
                     VoiceModeView(layout: L)
@@ -105,7 +107,7 @@ struct RootView: View {
                 .environmentObject(model)
         }
         .sheet(item: $model.openSource) { source in
-            SourceSheet(source: source) { model.showToast("Dokumentansicht folgt in der App") }
+            SourceSheet(source: source) { model.showToast("Diese Quelle hat keine Datei auf dem iPhone") }
         }
         .onChange(of: design) { _, newValue in
             switchDesign(to: newValue)
@@ -127,14 +129,42 @@ struct RootView: View {
     private func stage(_ L: StageLayout) -> some View {
         let scale = isChat ? StageLayout.avatarSize / L.stage : 1
         let centerY = isChat ? L.avatarCenter : L.centerY
-        return VelaVisual(driver: model.driver, preferredFPS: isChat ? 30 : 60)
+        return VelaVisual(driver: model.driver, preferredFPS: isChat ? 60 : 120)
             .frame(width: L.stage, height: L.stage)
             .clipShape(Circle())
             .scaleEffect(scale)
             .position(x: L.width / 2, y: L.y(centerY))
             .opacity(stageOpacity)
             .allowsHitTesting(false)
-            .animation(modeAnimation, value: isChat)
+            .animation(.spring(response: 0.78, dampingFraction: 0.86), value: isChat)
+    }
+
+    /// The stroke travels with the visual. Two views share one identity so the
+    /// shrink into the avatar is a matched geometry spring, while the Metal
+    /// view itself stays alive and only changes frame.
+    private func travelRing(_ L: StageLayout) -> some View {
+        Group {
+            if isChat {
+                ringStroke(StageLayout.avatarSize, bright: true)
+                    .matchedGeometryEffect(id: "velaRing", in: orbSpace)
+                    .position(x: L.width / 2, y: L.y(L.avatarCenter))
+            } else {
+                ringStroke(L.stage, bright: false)
+                    .matchedGeometryEffect(id: "velaRing", in: orbSpace)
+                    .position(x: L.width / 2, y: L.y(L.centerY))
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func ringStroke(_ side: CGFloat, bright: Bool) -> some View {
+        Circle()
+            .strokeBorder(
+                LinearGradient(colors: [Color.white.opacity(bright ? 0.85 : 0.35), Color.rgba(190, 160, 255, bright ? 0.7 : 0.22)],
+                               startPoint: .top, endPoint: .bottom),
+                lineWidth: bright ? 1.4 : 1
+            )
+            .frame(width: side, height: side)
     }
 
     private func avatarRing(_ L: StageLayout) -> some View {
@@ -179,7 +209,7 @@ struct RootView: View {
                 }
                 HeaderChip {
                     Image(systemName: "brain")
-                        .font(.system(size: 14))
+                        .velaText(14)
                         .opacity(0.85)
                     Text("Gedächtnis \(model.knowledge.memoryCount.formatted(.number.locale(Locale(identifier: "de_DE"))))")
                     Circle().fill(Theme.memoryGreen).frame(width: 6, height: 6).shadow(color: Theme.memoryGreen, radius: 3)
@@ -196,7 +226,7 @@ struct RootView: View {
                     model.showSettings = true
                 } label: {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 16, weight: .regular))
+                        .velaText(16, weight: .regular)
                         .foregroundStyle(.white.opacity(0.85))
                         .frame(width: 34, height: 34)
                         .velaChip(Circle())
@@ -217,7 +247,7 @@ struct RootView: View {
         VStack {
             if let toast = model.toast {
                 Text(toast)
-                    .font(.system(size: 13.5))
+                    .velaText(13.5)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .background(Color.rgba(30, 26, 48, 0.8), in: Capsule())
@@ -250,7 +280,7 @@ private struct HeaderChip<Content: View>: View {
 
     var body: some View {
         HStack(spacing: 8) { content }
-            .font(.system(size: 13.5))
+            .velaText(13.5)
             .foregroundStyle(.white.opacity(0.88))
             .padding(.horizontal, 14)
             .frame(height: 34)

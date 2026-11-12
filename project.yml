@@ -15,10 +15,24 @@ settings:
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     SWIFT_STRICT_CONCURRENCY: minimal
+packages:
+  mlx-swift-lm:
+    url: https://github.com/ml-explore/mlx-swift-lm
+    exactVersion: 2.31.3
+  swift-transformers:
+    url: https://github.com/huggingface/swift-transformers
+    exactVersion: 1.2.0
 targets:
   Vela:
     type: application
     platform: iOS
+    dependencies:
+      - package: mlx-swift-lm
+        product: MLXLLM
+      - package: mlx-swift-lm
+        product: MLXLMCommon
+      - package: swift-transformers
+        product: Hub
     sources:
       - path: Vela
     settings:
@@ -31,6 +45,8 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         MTL_FAST_MATH: YES
         ENABLE_PREVIEWS: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+        OTHER_LDFLAGS: "$(inherited) -lsqlite3"
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
     info:
       path: Support/Info.plist

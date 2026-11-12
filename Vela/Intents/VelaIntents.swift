@@ -39,13 +39,7 @@ struct AskVelaIntent: AppIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let model = AppModel.shared
-        // TODO(LLM): use model.brain once a real brain exists; the demo brain answers instantly here.
-        let answer: VelaAnswer
-        if let demo = model.brain as? DemoBrain {
-            answer = demo.quickAnswer(to: question)
-        } else {
-            answer = await model.brain.answer(to: question, history: [])
-        }
+        let answer = await model.brain.answer(to: question, history: model.messages)
         model.recordExternalExchange(question: question, answer: answer)
 
         var text = answer.spoken

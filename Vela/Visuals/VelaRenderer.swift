@@ -32,12 +32,16 @@ final class VelaGPU {
     static let shared: VelaGPU? = VelaGPU()
 
     static let pixelFormat: MTLPixelFormat = .bgra8Unorm
+    static let sceneFormat: MTLPixelFormat = .rgba16Float
     static let particleCount = 1400
 
     let device: MTLDevice
     let queue: MTLCommandQueue
     let quadPipelines: [MTLRenderPipelineState]
     let pointPipeline: MTLRenderPipelineState
+    let thresholdPipeline: MTLRenderPipelineState
+    let blurPipeline: MTLRenderPipelineState
+    let compositePipeline: MTLRenderPipelineState
     let particles: MTLBuffer
 
     private init?() {
@@ -48,11 +52,11 @@ final class VelaGPU {
             return nil
         }
         do {
-            func pipeline(_ vertex: String, _ fragment: String, additive: Bool) throws -> MTLRenderPipelineState {
+            func pipeline(_ vertex: String, _ fragment: String, format: MTLPixelFormat, additive: Bool) throws -> MTLRenderPipelineState {
                 let desc = MTLRenderPipelineDescriptor()
                 desc.vertexFunction = library.makeFunction(name: vertex)
                 desc.fragmentFunction = library.makeFunction(name: fragment)
-                desc.colorAttachments[0].pixelFormat = VelaGPU.pixelFormat
+                desc.colorAttachments[0].pixelFormat = format
                 if additive {
                     let ca = desc.colorAttachments[0]!
                     ca.isBlendingEnabled = true
@@ -66,11 +70,14 @@ final class VelaGPU {
                 return try device.makeRenderPipelineState(descriptor: desc)
             }
             let quads = try [
-                pipeline("vela_quad_vertex", "vela_nebula_fragment", additive: false),
-                pipeline("vela_quad_vertex", "vela_blackhole_fragment", additive: false),
-                pipeline("vela_quad_vertex", "vela_blackhole_nebula_fragment", additive: false)
+                pipeline("vela_quad_vertex", "vela_nebula_fragment", format: VelaGPU.sceneFormat, additive: false),
+                pipeline("vela_quad_vertex", "vela_blackhole_fragment", format: VelaGPU.sceneFormat, additive: false),
+                pipeline("vela_quad_vertex", "vela_blackhole_nebula_fragment", format: VelaGPU.sceneFormat, additive: false)
             ]
-            let points = try pipeline("vela_points_vertex", "vela_points_fragment", additive: true)
+            let points = try pipeline("vela_points_vertex", "vela_points_fragment", format: VelaGPU.sceneFormat, additive: true)
+            let threshold = try pipeline("vela_quad_vertex", "vela_threshold_fragment", format: VelaGPU.sceneFormat, additive: false)
+            let blur = try pipeline("vela_quad_vertex", "vela_blur_fragment", format: VelaGPU.sceneFormat, additive: false)
+            let composite = try pipeline("vela_quad_vertex", "vela_composite_fragment", format: VelaGPU.pixelFormat, additive: false)
 
             // Same deterministic random attributes as the prototype (Park-Miller, seed 1234567).
             let n = VelaGPU.particleCount * 4
@@ -89,6 +96,9 @@ final class VelaGPU {
             self.queue = queue
             self.quadPipelines = quads
             self.pointPipeline = points
+            self.thresholdPipeline = threshold
+            self.blurPipeline = blur
+            self.compositePipeline = composite
             self.particles = buffer
         } catch {
             print("[Vela] Pipeline-Fehler: \(error)")
@@ -102,6 +112,9 @@ final class VelaRenderer: NSObject, MTKViewDelegate {
     private let gpu: VelaGPU
     let driver: VisualDriver
     private var lastTime: CFTimeInterval = CACurrentMediaTime()
+    private var sceneTexture: MTLTexture?
+    private var bloomA: MTLTexture?
+    private var bloomB: MTLTexture?
 
     // Adaptive resolution (prototype: drop the render scale when frames are slow).
     private var slowAcc: Double = 0
@@ -143,10 +156,9 @@ final class VelaRenderer: NSObject, MTKViewDelegate {
 
         let size = view.drawableSize
         guard size.width > 1, size.height > 1,
-              let pass = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let commandBuffer = gpu.queue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+              ensureTargets(size) else {
             return
         }
 
@@ -157,22 +169,78 @@ final class VelaRenderer: NSObject, MTKViewDelegate {
 
         let design = max(0, min(2, Int(u.design)))
         let length = MemoryLayout<VelaUniforms>.stride
+        guard let scene = sceneTexture, let bloomA, let bloomB else { return }
 
-        // 1) full-screen visual
+        let scenePass = MTLRenderPassDescriptor()
+        scenePass.colorAttachments[0].texture = scene
+        scenePass.colorAttachments[0].loadAction = .clear
+        scenePass.colorAttachments[0].storeAction = .store
+        scenePass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: scenePass) else { return }
+
         encoder.setRenderPipelineState(gpu.quadPipelines[design])
         encoder.setFragmentBytes(&u, length: length, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
-        // 2) particles, additive
         encoder.setRenderPipelineState(gpu.pointPipeline)
         encoder.setVertexBuffer(gpu.particles, offset: 0, index: 0)
         encoder.setVertexBytes(&u, length: length, index: 1)
         let count = design == 0 ? min(VelaGPU.particleCount, 1100) : VelaGPU.particleCount
         encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: count)
-
         encoder.endEncoding()
+
+        // Bright parts, then a separable blur, then ACES + dither onto the screen.
+        fullscreen(commandBuffer, pipeline: gpu.thresholdPipeline, source: scene, target: bloomA, direction: nil)
+        fullscreen(commandBuffer, pipeline: gpu.blurPipeline, source: bloomA, target: bloomB, direction: SIMD2<Float>(1, 0))
+        fullscreen(commandBuffer, pipeline: gpu.blurPipeline, source: bloomB, target: bloomA, direction: SIMD2<Float>(0, 1))
+
+        guard let drawablePass = view.currentRenderPassDescriptor,
+              let composite = commandBuffer.makeRenderCommandEncoder(descriptor: drawablePass) else { return }
+        composite.setRenderPipelineState(gpu.compositePipeline)
+        composite.setFragmentTexture(scene, index: 0)
+        composite.setFragmentTexture(bloomA, index: 1)
+        composite.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        composite.endEncoding()
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+
+    private func fullscreen(_ buffer: MTLCommandBuffer, pipeline: MTLRenderPipelineState, source: MTLTexture, target: MTLTexture, direction: SIMD2<Float>?) {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        guard let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(source, index: 0)
+        var targetSize = SIMD2<Float>(Float(target.width), Float(target.height))
+        if let direction {
+            var dir = direction
+            encoder.setFragmentBytes(&dir, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            encoder.setFragmentBytes(&targetSize, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        } else {
+            encoder.setFragmentBytes(&targetSize, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+        }
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+    }
+
+    private func ensureTargets(_ size: CGSize) -> Bool {
+        let width = max(Int(size.width), 1)
+        let height = max(Int(size.height), 1)
+        if sceneTexture?.width == width, sceneTexture?.height == height { return sceneTexture != nil }
+        sceneTexture = makeTexture(width, height)
+        bloomA = makeTexture(max(width / 4, 1), max(height / 4, 1))
+        bloomB = makeTexture(max(width / 4, 1), max(height / 4, 1))
+        return sceneTexture != nil && bloomA != nil && bloomB != nil
+    }
+
+    private func makeTexture(_ width: Int, _ height: Int) -> MTLTexture? {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: VelaGPU.sceneFormat, width: width, height: height, mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .private
+        return gpu.device.makeTexture(descriptor: desc)
     }
 
     @MainActor

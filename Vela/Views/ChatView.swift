@@ -13,6 +13,7 @@ struct ChatView: View {
     let topInset: CGFloat
 
     @State private var draft = ""
+    @State private var importing = false
     @FocusState var inputFocused: Bool
 
     private var isChat: Bool { model.mode == .chat }
@@ -47,6 +48,7 @@ struct ChatView: View {
             .scrollDismissesKeyboard(.interactively)
             .offset(y: isChat ? 0 : 40)
             .onChange(of: model.messages.count) { _, _ in scrollToEnd(proxy) }
+            .onChange(of: model.streamRevision) { _, _ in scrollToEnd(proxy, animated: false) }
             .onChange(of: model.isTyping) { _, _ in scrollToEnd(proxy) }
             .onChange(of: isChat) { _, chat in
                 if chat {
@@ -71,7 +73,7 @@ struct ChatView: View {
             InputBar(draft: $draft, focused: $inputFocused,
                      onSend: send,
                      onVoice: { inputFocused = false; model.toVoice() },
-                     onAttach: { model.showToast("Dokument-Import folgt im nächsten Schritt") })
+                     onAttach: { importing = true })
                 .padding(.horizontal, 14)
                 .padding(.bottom, 10)
                 .offset(y: isChat ? 0 : 140)
@@ -80,6 +82,9 @@ struct ChatView: View {
         .opacity(isChat ? 1 : 0)
         .allowsHitTesting(isChat)
         .animation(isChat ? .easeOut(duration: 0.45).delay(0.3) : .easeOut(duration: 0.3), value: isChat)
+        .fileImporter(isPresented: $importing, allowedContentTypes: ImportTypes.allowed, allowsMultipleSelection: false) { result in
+            model.importFile(result)
+        }
     }
 
     private func send() {
@@ -117,12 +122,12 @@ struct MessageRow: View {
                 Spacer(minLength: 60)
                 VStack(alignment: .trailing, spacing: 6) {
                     Text(message.text)
-                        .font(.system(size: 17))
+                        .velaText(17)
                         .lineSpacing(3)
                         .foregroundStyle(.white.opacity(0.92))
                         .textSelection(.enabled)
                     Text(message.timeString)
-                        .font(.system(size: 11.5))
+                        .velaText(11.5)
                         .foregroundStyle(.white.opacity(0.45))
                 }
                 .padding(.horizontal, 18)
@@ -171,17 +176,17 @@ struct AnswerBubble: View {
             HStack(spacing: 8) {
                 if answer.isDemo {
                     Text("DEMO-ANTWORT")
-                        .font(.system(size: 10.5))
+                        .velaText(10.5)
                         .tracking(0.4)
                         .foregroundStyle(Color.rgba(190, 160, 255, 0.55))
                 }
                 Spacer(minLength: 0)
                 Text(time)
-                    .font(.system(size: 11.5))
+                    .velaText(11.5)
                     .foregroundStyle(.white.opacity(0.45))
             }
         }
-        .font(.system(size: 15.5))
+        .velaText(15.5)
         .lineSpacing(4)
         .foregroundStyle(.white.opacity(0.92))
         .textSelection(.enabled)
@@ -204,7 +209,7 @@ struct SourceChip: View {
                     .lineLimit(1)
                 Image(systemName: "arrow.up.right.square")
             }
-            .font(.system(size: 13))
+            .velaText(13)
             .foregroundStyle(.white.opacity(0.85))
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -315,7 +320,7 @@ struct InputBar: View {
         HStack(spacing: 12) {
             Button(action: onAttach) {
                 Image(systemName: "paperclip")
-                    .font(.system(size: 20))
+                    .velaText(20)
                     .foregroundStyle(.white.opacity(0.7))
                     .frame(width: 26, height: 26)
             }
@@ -323,7 +328,7 @@ struct InputBar: View {
             .accessibilityLabel("Datei anhängen")
 
             TextField("", text: $draft, prompt: Text("Nachricht schreiben …").foregroundStyle(.white.opacity(0.45)))
-                .font(.system(size: 17))
+                .velaText(17)
                 .foregroundStyle(.white)
                 .tint(Theme.cyan)
                 .submitLabel(.send)
@@ -341,11 +346,11 @@ struct InputBar: View {
                     Circle()
                         .strokeBorder(glow ? Color.rgba(190, 160, 255, 0.9) : Color.rgba(140, 225, 255, 0.85), lineWidth: 1.5)
                     Image(systemName: "mic")
-                        .font(.system(size: 19, weight: .medium))
+                        .velaText(19, weight: .medium)
                         .opacity(hasText ? 0 : 1)
                         .scaleEffect(hasText ? 0.5 : 1)
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 19, weight: .semibold))
+                        .velaText(19, weight: .semibold)
                         .opacity(hasText ? 1 : 0)
                         .scaleEffect(hasText ? 1 : 0.5)
                         .rotationEffect(.degrees(hasText ? 0 : -30))

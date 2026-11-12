@@ -83,15 +83,58 @@ struct VelaGlass<S: InsettableShape>: ViewModifier {
 
     @ViewBuilder
     private func decorated<V: View>(_ view: V) -> some View {
+        let highlighted = view
+            .overlay(alignment: .top) {
+                shape.stroke(
+                    LinearGradient(colors: [Color.white.opacity(0.55), Color.white.opacity(0.02)], startPoint: .top, endPoint: .center),
+                    lineWidth: 1
+                )
+                .blendMode(.plusLighter)
+                .allowsHitTesting(false)
+            }
+            .overlay(shape.strokeBorder(Theme.glassBorder, lineWidth: border ? 1 : 0).allowsHitTesting(false))
         if glow {
-            view
-                .overlay(shape.strokeBorder(Theme.glassBorder, lineWidth: border ? 1 : 0).allowsHitTesting(false))
-                .shadow(color: Color.rgba(150, 100, 255, 0.16), radius: 12)
+            highlighted
+                .shadow(color: Color.rgba(150, 100, 255, 0.18), radius: 16)
                 .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 12)
         } else {
-            view
-                .overlay(shape.strokeBorder(Theme.glassBorder, lineWidth: border ? 1 : 0).allowsHitTesting(false))
+            highlighted
         }
+    }
+}
+
+struct VelaTextModifier: ViewModifier {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    var size: CGFloat
+    var weight: Font.Weight = .regular
+
+    func body(content: Content) -> some View {
+        content.font(.system(size: size * VelaType.scale(for: dynamicTypeSize), weight: weight, design: .rounded))
+    }
+}
+
+enum VelaType {
+    static func scale(for size: DynamicTypeSize) -> CGFloat {
+        let factor: CGFloat
+        switch size {
+        case .xSmall: factor = 0.82
+        case .small: factor = 0.9
+        case .medium: factor = 0.95
+        case .large: factor = 1
+        case .xLarge: factor = 1.08
+        case .xxLarge: factor = 1.16
+        case .xxxLarge: factor = 1.24
+        case .accessibility1: factor = 1.32
+        case .accessibility2: factor = 1.4
+        default: factor = 1.45
+        }
+        return factor
+    }
+}
+
+extension View {
+    func velaText(_ size: CGFloat, weight: Font.Weight = .regular) -> some View {
+        modifier(VelaTextModifier(size: size, weight: weight))
     }
 }
 

@@ -18,8 +18,10 @@ beim Antippen in den **Glas-Chat**, zeigt zu jeder Antwort die **Quelle** und l�
 | Sprachausgabe mit der besten deutschen Apple-Stimme, auch über AirPlay/Bluetooth | ✅ |
 | Einstellungen: Design, Stimme, Vorlesen, Websuche (Platzhalter) | ✅ werden gespeichert |
 | Siri: „Starte Vela“, „Frag Vela“ (auch vom HomePod über Persönliche Anfragen) | ✅ |
-| Lokale KI (MLX / llama.cpp / Apple Foundation Models) | ⏳ Platzhalter `LocalLLMBrain` |
-| Handbücher & Standards importieren und durchsuchen (RAG) | ⏳ Platzhalter `KnowledgeStore` |
+| Lokale KI (MLX, Qwen 2.5 1.5B 4-bit) | ✅ wird in den Einstellungen geladen, streamt in die Blase; ohne Modell Demo mit Hinweis |
+| Apple Intelligence (iOS 26) | ✅ wählbar, wenn das Gerät es hat |
+| Handbücher importieren und durchsuchen (PDF, TXT, MD, DOCX) | ✅ Quellen-Chips und „Im Dokument öffnen“ |
+| Gedächtnis | ✅ Fakten, die du Vela über dich sagst, lokal |
 | Offline-KI-Stimme / Online-Premium-Stimme | ⏳ in den Einstellungen als „folgt“ |
 
 ## Aufbau
@@ -75,9 +77,17 @@ installieren (Daten bleiben erhalten). Mit dem Apple-Developer-Programm (99 €/
 - **Ton über HomePod/Lautsprecher:** im Kontrollzentrum per AirPlay auswählen – Vela spricht
   dann dort, das iPhone-Mikrofon hört weiter zu.
 
+## Lokales Modell
+
+Die Bibliotheken `MLXLLM` und `MLXLMCommon` kommen aus [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm) 2.31.3 (sie sind aus mlx-swift-examples dorthin umgezogen). Diese Fassung baut mit dem Xcode 26.3 der GitHub-Runner und lässt den Download-Ordner festlegen, damit das Modell wieder gelöscht werden kann.
+
+In den Einstellungen: **KI-Modell laden**. Das ist der einzige Netzwerkzugriff. Danach liegt Qwen 2.5 1.5B (4-bit, etwa 1 GB) unter Application Support. Auf einem iPhone 16 Pro Max reicht der Speicher für dieses 1.5B-Modell. Das erste Öffnen nach dem Laden dauert einen Moment, weil die Gewichte in den Speicher kommen. Ohne geladenes Modell antwortet weiter das Demo-Gehirn, mit einem Hinweis.
+
+Apple Intelligence ist eine zweite Engine, nur wenn iOS 26 sie auf dem Gerät freigeschaltet hat.
+
+Dokumente (PDF, Text, Markdown, DOCX) werden auf dem Gerät in Abschnitte zerlegt. Vektoren kommen von NaturalLanguage, wenn das deutsche Modell schon auf dem iPhone liegt, sonst eine Stichwortsuche. „Im Dokument öffnen“ zeigt die PDF-Seite. Fakten wie „Ich heiße …“ oder „Merke dir …“ bleiben lokal und zählen im Gedächtnis-Chip mit.
+
 ## Nächste Schritte
 
-1. Lokale KI einbauen (`Brain/VelaBrain.swift`, `LocalLLMBrain`).
-2. Dokument-Import + Suche mit Quellenangabe (`Knowledge/KnowledgeStore.swift`).
-3. Gedächtnis („lernt dich kennen“), natürliche Offline-Stimme.
-4. Vor einer App-Store-Veröffentlichung: Markenrecht für den Namen „Vela“ prüfen.
+1. Natürliche Offline-Stimme und die Websuche.
+2. Vor einer App-Store-Veröffentlichung: Markenrecht für den Namen „Vela“ prüfen.

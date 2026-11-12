@@ -21,17 +21,21 @@ struct SplashView: View {
             ZStack {
                 RadialGradient(colors: [Color.black.opacity(0.25), Color.black.opacity(0.7)],
                                center: UnitPoint(x: 0.5, y: 0.43), startRadius: 0, endRadius: geo.size.height * 0.5)
-                VStack(spacing: 14) {
+                VStack(spacing: 16) {
                     Text("Vela")
-                        .font(.system(size: 68, weight: .thin))
-                        .tracking(wordIn ? 68 * 0.32 : 68 * 0.7)
-                        .padding(.leading, 68 * 0.32)
+                        .font(.system(size: 68, weight: .thin, design: .rounded))
+                        .tracking(wordIn ? 68 * 0.28 : 68 * 0.7)
+                        .padding(.leading, 68 * 0.28)
                         .foregroundStyle(Theme.wordmark)
-                        .shadow(color: Color.rgba(160, 110, 255, 0.55), radius: wordIn ? 11 : 0)
+                        .shadow(color: Color.rgba(160, 110, 255, 0.55), radius: wordIn ? 16 : 0)
                         .blur(radius: wordIn ? 0 : 10)
                         .opacity(wordIn ? 1 : 0)
+                    Capsule()
+                        .fill(Theme.accentGradient)
+                        .frame(width: wordIn ? 72 : 8, height: 1)
+                        .opacity(tagIn ? 0.8 : 0)
                     Text("DEIN WISSEN · OFFLINE")
-                        .font(.system(size: 13))
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
                         .tracking(13 * 0.42)
                         .foregroundStyle(.white.opacity(0.55))
                         .offset(y: tagIn ? 0 : 8)

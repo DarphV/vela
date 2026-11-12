@@ -124,23 +124,26 @@ final class VisualDriver {
                 ampT = 0.04 + 0.03 * sin(time * 1.3)
             }
             ampT *= rm
-            amp += (ampT - amp) * min(1, dt * (ampT > amp ? 22 : 9))
+            // Listening stays close to the mic; speaking is audible but not frantic.
+            if state == .speaking { ampT *= 0.72 }
+            if state == .listening { ampT *= 0.8 }
+            amp = damp(amp, toward: ampT, dt: dt, rate: ampT > amp ? 7 : 4)
 
             let sp = state.speed * rm
-            speedCur += (sp - speedCur) * min(1, dt * 2.2)
+            speedCur = damp(speedCur, toward: sp, dt: dt, rate: 2.4)
             phase += dt * speedCur
 
             let energyT: Float = state == .thinking ? 1 : 0
-            energy += (energyT - energy) * min(1, dt * 2)
+            energy = damp(energy, toward: energyT, dt: dt, rate: 2.2)
 
             let zoomT: Float = mode == .chat ? (d == 1 ? 1.55 : 1.3) : 1
-            zoom += (zoomT - zoom) * min(1, dt * 3)
+            zoom = damp(zoom, toward: zoomT, dt: dt, rate: 2.6)
 
-            let brightT: Float = state == .thinking ? 1.12 : (state == .speaking ? 1.05 : 1)
-            bright += (brightT - bright) * min(1, dt * 3)
+            let brightT: Float = state == .thinking ? 1.1 : (state == .speaking ? 1.04 : 1)
+            bright = damp(bright, toward: brightT, dt: dt, rate: 2.4)
 
             let chatTarget: Float = mode == .chat ? 1 : 0
-            chatT += (chatTarget - chatT) * min(1, dt * 2.5)
+            chatT = damp(chatT, toward: chatTarget, dt: dt, rate: 2.2)
         }
 
         var u = VelaUniforms()
@@ -164,6 +167,12 @@ final class VisualDriver {
         let full = 1.0 / max(viewWidth, 1)
         let chat: Float = 0.6 / 110.0
         return full + (chat - full) * chatT
+    }
+
+    /// Frame-rate independent ease. `rate` is how quickly the value catches the target.
+    private func damp(_ value: Float, toward target: Float, dt: Float, rate: Float) -> Float {
+        let t = 1 - exp(-rate * dt)
+        return value + (target - value) * t
     }
 
     /// Synthetic speech envelope used while Vela speaks (prototype: voiceEnv).

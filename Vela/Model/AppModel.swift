@@ -6,6 +6,7 @@
 //  speech in/out and the brain. Mirrors the prototype's app.js logic.
 //
 
+import Combine
 import Foundation
 import SwiftUI
 
@@ -26,25 +27,31 @@ final class AppModel: ObservableObject {
     @Published private(set) var showSplash = true
     @Published var openSource: VelaSource?
     @Published var showSettings = false
+    @Published var streamRevision = 0
 
     // MARK: Engines
     let driver = VisualDriver()
     let listener = SpeechListener()
     let voice = VoiceOutput()
-    let knowledge: KnowledgeStore
-    let brain: VelaBrain
+    let knowledge: LocalKnowledgeStore
+    let models: ModelStore
+    let brain: VelaEngine
 
     private var permission: Permission = .unknown
     private var heardText = ""
     private var silenceTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
     private var restartFailures = 0
+    private var spokenPrefix = ""
+    private var replyFinished = false
+    private var cancellables = Set<AnyCancellable>()
 
     private init() {
-        let store = DemoKnowledgeStore()
+        let store = LocalKnowledgeStore()
+        let models = ModelStore()
         knowledge = store
-        // TODO(LLM): switch to LocalLLMBrain(knowledge: store) once the model is integrated.
-        brain = DemoBrain()
+        self.models = models
+        brain = VelaEngine(knowledge: store, models: models)
         messages = DemoBrain.welcomeExchange()
 
         driver.design = VelaSettings.design
@@ -59,8 +66,40 @@ final class AppModel: ObservableObject {
             self?.handleRecognitionEnded(error)
         }
         voice.onFinish = { [weak self] cancelled in
-            self?.speechFinished(cancelled: cancelled)
+            self?.speechQueueDrained(cancelled: cancelled)
         }
+
+        store.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.objectWillChange.send() }
+        }.store(in: &cancellables)
+        models.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.objectWillChange.send() }
+        }.store(in: &cancellables)
+        prepareScreenshotIfNeeded()
+    }
+
+    private func prepareScreenshotIfNeeded() {
+        guard let kind = ScreenshotLaunch.kind else { return }
+        showSplash = false
+        switch kind {
+        case .voiceNebula:
+            driver.design = 0
+            setState(.listening)
+        case .voiceBlackHole:
+            driver.design = 1
+            setState(.listening)
+        case .voiceNebulaDisk:
+            driver.design = 2
+            setState(.listening)
+        case .chat:
+            mode = .chat
+            driver.mode = .chat
+            setState(.idle)
+        case .settings:
+            setState(.idle)
+            showSettings = true
+        }
+        for _ in 0..<10 { _ = driver.step(dt: 0.16) }
     }
 
     // MARK: - State helpers
@@ -85,15 +124,34 @@ final class AppModel: ObservableObject {
         driver.design = design
     }
 
+    func importFile(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure(let error):
+            showToast(error.localizedDescription)
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            Task {
+                do {
+                    let document = try await knowledge.importDocument(at: url)
+                    showToast("Gespeichert: \(document.name) · \(document.chunkCount) Abschnitte")
+                } catch {
+                    showToast(error.localizedDescription)
+                }
+            }
+        }
+    }
+
     // MARK: - Lifecycle
 
     func splashFinished() {
         guard showSplash else { return }
         showSplash = false
+        guard ScreenshotLaunch.kind == nil else { return }
         Task { await startVoiceSession() }
     }
 
     func sceneBecameActive() {
+        guard ScreenshotLaunch.kind == nil else { return }
         AudioSessionManager.activate()
         if mode == .voice && !showSplash && !showSettings {
             Task { await startVoiceSession() }
@@ -122,6 +180,7 @@ final class AppModel: ObservableObject {
     // MARK: - Voice session
 
     func startVoiceSession() async {
+        guard ScreenshotLaunch.kind == nil else { return }
         guard mode == .voice else { return }
         if permission == .unknown {
             permission = await SpeechListener.requestPermissions() ? .granted : .denied
@@ -147,7 +206,7 @@ final class AppModel: ObservableObject {
         heardText = ""
         silenceTask?.cancel()
         do {
-            try listener.start()
+            try listener.start(hints: knowledge.speechHints)
             driver.micActive = true
             setState(.listening)
             subline = listener.isOnDevice ? "Offline-Spracherkennung aktiv" : "Spracherkennung aktiv"
@@ -176,7 +235,6 @@ final class AppModel: ObservableObject {
             finishUtterance()
             return
         }
-        // End of utterance after 1.2 s without new words (prototype VAD: silence > 1.2 s).
         silenceTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(1200))
             guard !Task.isCancelled else { return }
@@ -190,7 +248,6 @@ final class AppModel: ObservableObject {
             finishUtterance()
             return
         }
-        // Nothing heard (timeout / no speech): restart quietly, give up after a few failures.
         stopListening()
         restartFailures += 1
         if restartFailures > 5 {
@@ -222,38 +279,110 @@ final class AppModel: ObservableObject {
     func sendText(_ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
+        Haptics.light()
         Task { await ask(t, fromVoice: false) }
     }
 
     private func ask(_ question: String, fromVoice: Bool) async {
         voice.stop()
+        spokenPrefix = ""
+        replyFinished = false
+        knowledge.rememberIfPersonal(question)
         messages.append(.user(question))
         if !fromVoice {
             try? await Task.sleep(for: .milliseconds(250))
             isTyping = true
         }
         setState(.thinking)
-        let answer = await brain.answer(to: question, history: messages)
-        isTyping = false
-        messages.append(.assistant(answer))
-        respond(with: answer)
-    }
-
-    private func respond(with answer: VelaAnswer) {
-        setState(.speaking)
-        if VelaSettings.ttsEnabled {
-            AudioSessionManager.activate()
-            voice.speak(answer.spoken, voiceID: VelaSettings.voiceID)
-        } else {
-            Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(3500))
-                self?.speechFinished(cancelled: false)
+        var messageID: UUID?
+        let answer = await brain.streamAnswer(to: question, history: messages) { [weak self] text in
+            guard let self else { return }
+            self.isTyping = false
+            if messageID == nil {
+                var message = ChatMessage.assistant(VelaAnswer(blocks: [.paragraph(text)], spoken: text, sources: [], isDemo: false))
+                message.text = text
+                messageID = message.id
+                self.messages.append(message)
+                self.setState(.speaking)
+            } else if let id = messageID, let index = self.messages.firstIndex(where: { $0.id == id }) {
+                self.messages[index].text = text
+                self.messages[index].answer = VelaAnswer(blocks: [.paragraph(text)], spoken: text, sources: [], isDemo: false)
             }
+            self.streamRevision += 1
+            self.speakNewSentences(in: text, flush: false)
+        }
+        isTyping = false
+        if let id = messageID, let index = messages.firstIndex(where: { $0.id == id }) {
+            messages[index].text = VelaPrompt.joined(answer)
+            messages[index].answer = answer
+        } else {
+            messages.append(.assistant(answer))
+        }
+        streamRevision += 1
+        speakNewSentences(in: VelaPrompt.joined(answer), flush: true)
+        replyFinished = true
+        if !VelaSettings.ttsEnabled || !voice.hasPending {
+            speechFinished(cancelled: false)
         }
     }
 
+    private func speakNewSentences(in full: String, flush: Bool) {
+        guard VelaSettings.ttsEnabled else { return }
+        let spoken = VelaPrompt.spoken(from: full)
+        guard spoken.hasPrefix(spokenPrefix) else {
+            spokenPrefix = ""
+            return
+        }
+        let start = spoken.index(spoken.startIndex, offsetBy: spokenPrefix.count)
+        var rest = spoken[start...]
+        while true {
+            guard let end = sentenceEnd(in: rest) else { break }
+            let raw = rest[..<end]
+            let piece = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let used = spoken.distance(from: rest.startIndex, to: end)
+            if piece.count < 8 && !flush { break }
+            if !piece.isEmpty {
+                AudioSessionManager.activate()
+                voice.enqueue(piece, voiceID: VelaSettings.voiceID)
+                setState(.speaking)
+            }
+            spokenPrefix += String(rest.prefix(used))
+            rest = rest[end...]
+            if rest.isEmpty { break }
+        }
+        if flush {
+            let tail = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+            if tail.count >= 2 {
+                AudioSessionManager.activate()
+                voice.enqueue(tail, voiceID: VelaSettings.voiceID)
+                setState(.speaking)
+            }
+            spokenPrefix = spoken
+        }
+    }
+
+    private func sentenceEnd(in text: Substring) -> String.Index? {
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if ".!?…".contains(character) || character.isNewline {
+                let next = text.index(after: index)
+                if next == text.endIndex || text[next].isWhitespace || text[next].isNewline {
+                    return next
+                }
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private func speechQueueDrained(cancelled: Bool) {
+        guard replyFinished || cancelled else { return }
+        speechFinished(cancelled: cancelled)
+    }
+
     private func speechFinished(cancelled: Bool) {
-        guard !cancelled, state == .speaking else { return }
+        guard !cancelled, state == .speaking || state == .thinking else { return }
         setState(.idle)
         if mode == .voice {
             startListening()
@@ -270,6 +399,7 @@ final class AppModel: ObservableObject {
 
     func toChat() {
         guard mode == .voice else { return }
+        Haptics.light()
         stopListening()
         voice.stop()
         mode = .chat
@@ -279,6 +409,7 @@ final class AppModel: ObservableObject {
 
     func toVoice() {
         guard mode == .chat else { return }
+        Haptics.light()
         voice.stop()
         mode = .voice
         driver.mode = .voice

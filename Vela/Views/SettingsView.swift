@@ -17,6 +17,9 @@ struct SettingsView: View {
     @AppStorage(VelaSettings.voiceKey) private var voiceID = ""
     @AppStorage(VelaSettings.ttsKey) private var ttsEnabled = true
     @AppStorage(VelaSettings.webSearchKey) private var webSearch = false
+    @AppStorage(VelaSettings.engineKey) private var engine = VelaEngineKind.local.rawValue
+
+    @State private var importing = false
 
     @State private var thumbnails: [VisualDriver] = VelaDesign.allCases.map { VisualDriver.thumbnail(design: $0.rawValue) }
     @State private var voices: [AVSpeechSynthesisVoice] = []
@@ -58,37 +61,85 @@ struct SettingsView: View {
                     .padding(.vertical, 11)
                 }
 
+                SectionTitle("KI-Modell")
+                modelGroup
+
                 SectionTitle("Wissen")
                 SettingsGroup {
+                    if model.knowledge.documents.isEmpty {
+                        Text("Noch keine Dokumente")
+                            .velaText(15)
+                            .foregroundStyle(.white.opacity(0.45))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 14)
+                        Divider().overlay(Color.white.opacity(0.07))
+                    }
                     ForEach(model.knowledge.documents) { doc in
                         HStack(spacing: 12) {
                             RowLabel(icon: "doc.text", title: doc.name, subtitle: doc.detail)
-                            Spacer(minLength: 0)
+                            Spacer(minLength: 8)
+                            Button {
+                                model.knowledge.deleteDocument(id: doc.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .velaText(14)
+                                    .foregroundStyle(.white.opacity(0.55))
+                                    .frame(width: 32, height: 32)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("\(doc.name) löschen")
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 11)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
                         Divider().overlay(Color.white.opacity(0.07))
                     }
-                    Button {
-                        // TODO(RAG-Import): .fileImporter(allowedContentTypes: [.pdf, .plainText, docx]) → knowledge.importDocument(at:)
-                        model.showToast("Dokument-Import folgt im nächsten Schritt")
-                    } label: {
+                    Button { importing = true } label: {
                         HStack(spacing: 12) {
                             IconTile(icon: "plus")
-                            Text("Dokument hinzufügen")
-                                .font(.system(size: 15.5))
+                            Text(model.knowledge.isImporting ? "Dokument wird gelesen …" : "Dokument hinzufügen")
+                                .velaText(15.5)
                                 .foregroundStyle(Color.rgba(185, 160, 255))
                             Spacer()
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 11)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .disabled(model.knowledge.isImporting)
+                    .accessibilityLabel("Dokument hinzufügen")
                 }
 
-                Text("Vela · \(version) · Antworten sind Demo-Daten")
-                    .font(.system(size: 11.5))
+                if !model.knowledge.facts.isEmpty {
+                    SectionTitle("Gedächtnis")
+                    SettingsGroup {
+                        ForEach(model.knowledge.facts) { fact in
+                            HStack(alignment: .top, spacing: 12) {
+                                Text(fact.text)
+                                    .velaText(15)
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Button {
+                                    model.knowledge.forgetFact(id: fact.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .velaText(14)
+                                        .foregroundStyle(.white.opacity(0.55))
+                                        .frame(width: 32, height: 32)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Fakt löschen")
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            Divider().overlay(Color.white.opacity(0.07))
+                        }
+                    }
+                }
+
+                Text(footer)
+                    .velaText(11.5)
                     .foregroundStyle(.white.opacity(0.3))
                     .frame(maxWidth: .infinity)
                     .padding(.top, 18)
@@ -103,6 +154,68 @@ struct SettingsView: View {
         .velaSheetStyle()
         .onAppear {
             voices = VoiceOutput.germanVoices()
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: ImportTypes.allowed, allowsMultipleSelection: false) { result in
+            model.importFile(result)
+        }
+    }
+
+    private var footer: String {
+        switch VelaEngineKind(rawValue: engine) ?? .local {
+        case .local where model.models.isInstalled:
+            return "Vela · \(version) · Qwen 2.5 · offline"
+        case .apple where AppleIntelligenceStatus.isAvailable:
+            return "Vela · \(version) · Apple Intelligence · offline"
+        case .demo:
+            return "Vela · \(version) · Demo-Antworten"
+        default:
+            return "Vela · \(version) · Demo, bis das Modell geladen ist"
+        }
+    }
+
+    private var modelGroup: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SettingsGroup {
+                VoiceRow(title: "Lokal auf dem iPhone", subtitle: "Qwen 2.5 1.5B · 4-bit · offline",
+                         selected: engine == VelaEngineKind.local.rawValue) {
+                    engine = VelaEngineKind.local.rawValue
+                }
+                Divider().overlay(Color.white.opacity(0.07))
+                VoiceRow(title: "Apple Intelligence", subtitle: AppleIntelligenceStatus.detail,
+                         selected: engine == VelaEngineKind.apple.rawValue,
+                         enabled: AppleIntelligenceStatus.isAvailable) {
+                    engine = VelaEngineKind.apple.rawValue
+                }
+                Divider().overlay(Color.white.opacity(0.07))
+                VoiceRow(title: "Demo", subtitle: "Feste Beispielantworten, ohne Modell",
+                         selected: engine == VelaEngineKind.demo.rawValue) {
+                    engine = VelaEngineKind.demo.rawValue
+                }
+            }
+            SettingsGroup {
+                VStack(alignment: .leading, spacing: 8) {
+                    RowLabel(icon: "cpu", title: "Qwen 2.5 1.5B", subtitle: model.models.detail)
+                    if case .downloading = model.models.phase {
+                        ProgressView(value: model.models.fraction)
+                            .tint(Theme.violet)
+                        Button("Laden abbrechen") { model.models.cancelDownload() }
+                            .velaText(14, weight: .medium)
+                            .foregroundStyle(Color.rgba(185, 160, 255))
+                    } else if model.models.isInstalled {
+                        Button("Modell löschen") { model.models.delete() }
+                            .velaText(14, weight: .medium)
+                            .foregroundStyle(Color.rgba(185, 160, 255))
+                    } else {
+                        Button("KI-Modell laden") { model.models.download() }
+                            .velaText(15.5, weight: .semibold)
+                            .foregroundStyle(Color.rgba(185, 160, 255))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityElement(children: .contain)
         }
     }
 
@@ -121,7 +234,7 @@ struct SettingsView: View {
                             .background(Color.black)
                             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                         Text(d.title)
-                            .font(.system(size: 12))
+                            .velaText(12)
                             .multilineTextAlignment(.center)
                             .lineSpacing(1)
                             .foregroundStyle(.white.opacity(selected ? 1 : 0.75))
@@ -175,7 +288,7 @@ struct SettingsView: View {
 
         if voices.allSatisfy({ $0.quality != .premium }) {
             Text("Tipp: Premium-Stimmen (z. B. Anna) unter iOS-Einstellungen › Bedienungshilfen › Gesprochene Inhalte › Stimmen › Deutsch laden.")
-                .font(.system(size: 12))
+                .velaText(12)
                 .foregroundStyle(.white.opacity(0.45))
                 .padding(.horizontal, 4)
                 .padding(.top, 8)
@@ -192,7 +305,7 @@ private struct SectionTitle: View {
 
     var body: some View {
         Text(text.uppercased())
-            .font(.system(size: 12, weight: .semibold))
+            .velaText(12, weight: .semibold)
             .tracking(0.8)
             .foregroundStyle(.white.opacity(0.45))
             .padding(.horizontal, 4)
@@ -206,8 +319,14 @@ private struct SettingsGroup<Content: View>: View {
 
     var body: some View {
         VStack(spacing: 0) { content }
-            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.07), lineWidth: 1))
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+            .overlay(alignment: .top) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(LinearGradient(colors: [Color.white.opacity(0.28), .clear], startPoint: .top, endPoint: .center), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
@@ -217,7 +336,7 @@ private struct IconTile: View {
 
     var body: some View {
         Image(systemName: icon)
-            .font(.system(size: 14))
+            .velaText(14)
             .foregroundStyle(.white)
             .frame(width: 30, height: 30)
             .background(Theme.iconGradient, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -234,10 +353,10 @@ private struct RowLabel: View {
             IconTile(icon: icon)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 15.5))
+                    .velaText(15.5)
                     .foregroundStyle(.white)
                 Text(subtitle)
-                    .font(.system(size: 12.5))
+                    .velaText(12.5)
                     .foregroundStyle(.white.opacity(0.45))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -257,10 +376,10 @@ private struct VoiceRow: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.system(size: 15.5))
+                        .velaText(15.5)
                         .foregroundStyle(.white.opacity(enabled ? 1 : 0.5))
                     Text(subtitle)
-                        .font(.system(size: 12.5))
+                        .velaText(12.5)
                         .foregroundStyle(.white.opacity(0.45))
                         .fixedSize(horizontal: false, vertical: true)
                 }

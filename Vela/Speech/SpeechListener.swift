@@ -68,7 +68,7 @@ final class SpeechListener {
 
     // MARK: Start / stop
 
-    func start() throws {
+    func start(hints: [String] = []) throws {
         stop()
         guard let recognizer, recognizer.isAvailable else { throw ListenerError.recognizerUnavailable }
 
@@ -83,7 +83,10 @@ final class SpeechListener {
         if recognizer.supportsOnDeviceRecognition {
             req.requiresOnDeviceRecognition = true
         }
-        // TODO(Gedächtnis): req.contextualStrings = Fachbegriffe aus den importierten Dokumenten
+        let terms = hints.filter { !$0.isEmpty }
+        if !terms.isEmpty {
+            req.contextualStrings = Array(terms.prefix(40))
+        }
 
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             req.append(buffer)

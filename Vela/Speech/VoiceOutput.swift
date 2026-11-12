@@ -20,6 +20,9 @@ final class VoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
     var onFinish: ((_ cancelled: Bool) -> Void)?
 
     private let synthesizer = AVSpeechSynthesizer()
+    private var epoch = 0
+    private var pending = 0
+    private var epochs: [ObjectIdentifier: Int] = [:]
 
     override init() {
         super.init()
@@ -28,20 +31,32 @@ final class VoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     var isSpeaking: Bool { synthesizer.isSpeaking }
+    var hasPending: Bool { pending > 0 }
 
+    /// Replaces anything currently spoken. Used for the voice preview.
     func speak(_ text: String, voiceID: String) {
-        if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking(at: .immediate)
-        }
-        let utterance = AVSpeechUtterance(string: text)
+        stop()
+        enqueue(text, voiceID: voiceID)
+    }
+
+    /// Queues the next sentence without cutting off the one already playing.
+    func enqueue(_ text: String, voiceID: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let utterance = AVSpeechUtterance(string: trimmed)
         utterance.voice = VoiceOutput.resolveVoice(id: voiceID)
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         utterance.pitchMultiplier = 1.0
         utterance.prefersAssistiveTechnologySettings = false
+        epochs[ObjectIdentifier(utterance)] = epoch
+        pending += 1
         synthesizer.speak(utterance)
     }
 
     func stop() {
+        epoch += 1
+        pending = 0
+        epochs.removeAll()
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
@@ -94,13 +109,23 @@ final class VoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
-            self?.onFinish?(false)
+            self?.complete(utterance, cancelled: false)
         }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
-            self?.onFinish?(true)
+            self?.complete(utterance, cancelled: true)
+        }
+    }
+
+    private func complete(_ utterance: AVSpeechUtterance, cancelled: Bool) {
+        let key = ObjectIdentifier(utterance)
+        guard epochs[key] == epoch else { return }
+        epochs[key] = nil
+        pending = max(0, pending - 1)
+        if pending == 0 {
+            onFinish?(cancelled)
         }
     }
 }

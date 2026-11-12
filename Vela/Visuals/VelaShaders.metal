@@ -115,7 +115,7 @@ inline float2 uvc(float2 fc, constant VelaUniforms &U) {
     return p / U.zoom;
 }
 
-inline float stars(float2 p, float dens, float time) {
+inline float starLayer(float2 p, float dens, float time) {
     float2 g = p * dens;
     float2 id = floor(g);
     float h = hash12(id);
@@ -126,12 +126,21 @@ inline float stars(float2 p, float dens, float time) {
     return (1.f - smoothstep(0.f, .12f, d)) * (h - .93f) * 14.f * tw;
 }
 
+inline float stars(float2 p, float dens, float time) {
+    // Two depths drift at different speeds: a cheap parallax field.
+    float near = starLayer(p + float2(time * 0.018f, time * 0.007f), dens, time);
+    float far = starLayer(p + float2(-time * 0.006f, time * 0.004f), dens * 0.62f, time * 0.8f);
+    return near + far * 0.55f;
+}
+
 // Tone mapping + premultiplied alpha, identical to the prototype's outc().
 inline float4 outc(float3 c, float solid, constant VelaUniforms &U) {
     c *= U.bright;
-    c = 1.f - exp(-c * 1.15f);
-    c = pow(max(c, float3(0.f)), float3(.95f));
-    float a = clamp(max(c.r, max(c.g, c.b)) * 1.15f, 0.f, 1.f);
+    c = max(c, float3(0.f));
+    // Leave a little headroom. The composite pass applies ACES and bloom.
+    c = c / (1.f + 0.22f * c);
+    float peak = max(c.r, max(c.g, c.b));
+    float a = clamp(peak * 1.05f, 0.f, 1.f);
     a = max(a, solid);
     return float4(c, a);
 }
@@ -221,7 +230,9 @@ inline float3 emis(float rd, float a, float rs, constant VelaUniforms &U) {
     float n = fbmV(float3(cs * 1.3f, rd * 20.f + U.time * .05f));
     float n2 = vnoise3(float3(cs * 3.5f, rd * 70.f));
     float I = prof * (.45f + 1.5f * n * n) * (.7f + .6f * n2) * 1.5f;
-    return ramp(1.f - x) * I * (1.f + .28f * cos(a)) * (1.f + .6f * U.amp);
+    // Approaching side of the disk is brighter (Doppler beaming).
+    float doppler = 0.42f + 0.95f * smoothstep(-1.f, 1.f, cos(a - 0.6f));
+    return ramp(1.f - x) * I * doppler * (1.f + .45f * U.amp);
 }
 
 fragment float4 vela_blackhole_fragment(QuadOut in [[stage_in]], constant VelaUniforms &U [[buffer(0)]]) {
@@ -252,6 +263,7 @@ fragment float4 vela_blackhole_fragment(QuadOut in [[stage_in]], constant VelaUn
     float shadow = 1.f - smoothstep(rs * .97f, rs * 1.005f, r);
     col *= 1.f - shadow;
     col += float3(1.f, .86f, .66f) * exp(-abs(r - rs * 1.012f) * 110.f) * mix(.35f, 1.1f, smoothstep(-.8f, .6f, up));
+    col += float3(1.f, .94f, .82f) * exp(-abs(r - rs * 1.045f) * 180.f) * 0.55f;
     col += float3(1.f, .55f, .2f) * .10f * exp(-max(r - rs, 0.f) * 3.f) * (1.f - shadow);
     col += float3(1.f, .6f, .25f) * .35f * exp(-abs(p.y) * 14.f) * exp(-abs(p.x) * 2.6f) * (1.f - shadow) * (1.f + .5f * U.amp);
     if (dy <= 0.f) { col += dcol; }
@@ -369,4 +381,56 @@ fragment float4 vela_points_fragment(PointFragIn in [[stage_in]], float2 pc [[po
     float d = dot(c, c);
     float f = exp(-d * 18.f);
     return float4(in.col * in.alpha * f, in.alpha * f * .6f);
+}
+
+// ---------------------------------------------------------------- bloom + filmic composite
+
+inline float3 acesFit(float3 x) {
+    x = max(x, float3(0.f));
+    const float a = 2.51f;
+    const float b = 0.03f;
+    const float c = 2.43f;
+    const float d = 0.59f;
+    const float e = 0.14f;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.f, 1.f);
+}
+
+fragment float4 vela_threshold_fragment(QuadOut in [[stage_in]],
+                                        texture2d<float> src [[texture(0)]],
+                                        constant float2 &target [[buffer(0)]]) {
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = in.position.xy / max(target, float2(1.f));
+    float3 c = max(src.sample(smp, uv).rgb, float3(0.f));
+    float luma = max(c.r, max(c.g, c.b));
+    float mask = smoothstep(0.55f, 1.15f, luma);
+    return float4(c * mask, 1.f);
+}
+
+fragment float4 vela_blur_fragment(QuadOut in [[stage_in]],
+                                   texture2d<float> src [[texture(0)]],
+                                   constant float2 &dir [[buffer(0)]],
+                                   constant float2 &target [[buffer(1)]]) {
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = in.position.xy / max(target, float2(1.f));
+    float2 texel = dir / float2(src.get_width(), src.get_height());
+    float3 c = src.sample(smp, uv).rgb * 0.227027f;
+    c += src.sample(smp, uv + texel * 1.384615f).rgb * 0.316216f;
+    c += src.sample(smp, uv - texel * 1.384615f).rgb * 0.316216f;
+    c += src.sample(smp, uv + texel * 3.230769f).rgb * 0.070270f;
+    c += src.sample(smp, uv - texel * 3.230769f).rgb * 0.070270f;
+    return float4(c, 1.f);
+}
+
+fragment float4 vela_composite_fragment(QuadOut in [[stage_in]],
+                                        texture2d<float> scene [[texture(0)]],
+                                        texture2d<float> bloom [[texture(1)]]) {
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 size = float2(scene.get_width(), scene.get_height());
+    float2 uv = in.position.xy / max(size, float2(1.f));
+    float4 base = scene.sample(smp, uv);
+    float3 glow = bloom.sample(smp, uv).rgb;
+    float3 ldr = acesFit(base.rgb + glow * 0.62f);
+    float noise = fract(sin(dot(in.position.xy, float2(12.9898f, 78.233f))) * 43758.5453f);
+    ldr += (noise - 0.5f) / 255.f;
+    return float4(clamp(ldr, 0.f, 1.f), base.a);
 }

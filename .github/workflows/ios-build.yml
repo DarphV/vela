@@ -17,7 +17,7 @@ jobs:
   build:
     name: Vela (unsigned .ipa)
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +55,8 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -78,6 +80,18 @@ jobs:
         with:
           name: Vela-unsigned-ipa
           path: Vela-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Simulator-Screenshots
+        run: bash scripts/capture-screenshots.sh
+
+      - name: Screenshots hochladen
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vela-screenshots
+          path: screenshots/
           if-no-files-found: error
           retention-days: 30
 
