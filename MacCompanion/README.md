@@ -31,6 +31,16 @@ Autostart: `LaunchAgents/de.barczewski.vela.macd.plist` nach `~/Library/LaunchAg
 | Zwischenablage | keine, aber in Vela als heikle Aktion bestätigt |
 
 AppleScripts laufen nur nach Namen aus `~/Library/Application Support/VelaMac/scripts/<Name>.scpt`.
-Es wird kein Skripttext vom iPhone angenommen. Heikle Aktionen (URL, Skript, Kurzbefehl, Tippen, Screenshot, Zwischenablage) führt das iPhone erst nach einer Rückfrage aus, und nur wenn die Berechtigung auf dem Mac an ist.
+Es wird kein Skripttext vom iPhone angenommen.
 
-Standard an: App öffnen, Lautstärke, Medien, laufende Apps. Der Rest ist aus, bis er in den Einstellungen eingeschaltet wird.
+In `permissions.json` steht der Modus `ask`, `session` oder `always` und welche Fähigkeiten an sind. Der Mac bleibt die Instanz: ohne angehakte Fähigkeit passiert nichts, und `ask` verlangt die Bestätigung vom iPhone. `session` gilt nur, solange `vela-macd` läuft und Vela die Sitzung nicht beendet. `always` bleibt gespeichert.
+
+```bash
+vela-macd --grant ask|session|always
+vela-macd --allow apps|typing|scripts|media|screenshot|clipboard
+vela-macd --deny typing
+vela-macd --revoke
+vela-macd --log
+```
+
+Dieselben Schalter liegen im Menüleisteneintrag „Vela“. Die letzten 100 Aktionen stehen in `actions.json` und unter Einstellungen › Mac-Verbindung.

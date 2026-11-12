@@ -18,12 +18,34 @@ struct MacPeer: Identifiable, Hashable {
     var port: Int
 }
 
+enum MacGrantMode: String {
+    case ask, session, always
+}
+
+struct MacLogEntry: Identifiable, Hashable {
+    let id = UUID()
+    var time: String
+    var name: String
+    var message: String
+}
+
 struct MacAction: Identifiable {
     let id = UUID()
     var name: String
     var value: String
     var summary: String
     var risky: Bool
+}
+
+enum MacCapabilities {
+    static let groups: [(key: String, title: String, names: [String])] = [
+        ("apps", "Apps öffnen", ["openApp", "openURL", "apps"]),
+        ("typing", "Tippen/Tastatur", ["type"]),
+        ("scripts", "Skripte/Kurzbefehle", ["shortcut", "applescript"]),
+        ("media", "Medien/Lautstärke", ["media", "volume"]),
+        ("screenshot", "Screenshot", ["screenshot"]),
+        ("clipboard", "Zwischenablage", ["clipboard"])
+    ]
 }
 
 enum MacToolRouter {
@@ -80,6 +102,9 @@ final class MacConnection: NSObject, ObservableObject, NetServiceBrowserDelegate
     @Published private(set) var status = "Nicht verbunden"
     @Published var pairedName: String = UserDefaults.standard.string(forKey: "vela.mac.name") ?? ""
     @Published var permissions: [String: Bool] = [:]
+    @Published var mode: MacGrantMode = .ask
+    @Published var sessionActive = false
+    @Published var log: [MacLogEntry] = []
 
     private let browser = NetServiceBrowser()
     private var resolving: [NetService] = []
@@ -121,6 +146,7 @@ final class MacConnection: NSObject, ObservableObject, NetServiceBrowserDelegate
             UserDefaults.standard.set(peer.port, forKey: "vela.mac.port")
             UserDefaults.standard.set(peer.name, forKey: "vela.mac.name")
             await refreshPermissions()
+            await refreshLog()
             return "Gekoppelt mit \(peer.name)."
         } catch {
             return "Kopplung fehlgeschlagen."
@@ -138,20 +164,84 @@ final class MacConnection: NSObject, ObservableObject, NetServiceBrowserDelegate
             self.port = 0
             self.pairedName = ""
             self.permissions = [:]
+            self.mode = .ask
+            self.sessionActive = false
+            self.log = []
             self.status = "Nicht verbunden"
         }
     }
 
-    func perform(_ action: MacAction) async -> String {
+    func isOn(_ name: String) -> Bool { permissions[name] == true }
+
+    /// Standing permission skips the iPhone prompt. The Mac still checks the same mode.
+    func needsConfirmation(_ name: String) -> Bool {
+        guard isOn(name) else { return false }
+        switch mode {
+        case .always: return false
+        case .session: return !sessionActive
+        case .ask: return true
+        }
+    }
+
+    func perform(_ action: MacAction, confirm: Bool) async -> String {
         guard isPaired else { return "Zuerst den Mac unter Einstellungen koppeln." }
         do {
-            let body = try JSONSerialization.data(withJSONObject: ["name": action.name, "value": action.value])
-            let data = try await signed(method: "POST", path: "/action", body: body)
+            let body = try JSONSerialization.data(withJSONObject: [
+                "name": action.name, "value": action.value, "confirm": confirm, "session": sessionActive
+            ])
+            let (data, status) = try await signedStatus(method: "POST", path: "/action", body: body)
+            if status == 403 {
+                sessionActive = false
+                return "CONFIRM"
+            }
             let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            await refreshLog()
             return object?["message"] as? String ?? "Erledigt."
         } catch {
+            sessionActive = false
             return "Der Mac antwortet nicht."
         }
+    }
+
+    func setMode(_ next: MacGrantMode) async {
+        mode = next
+        sessionActive = next == .session
+        let body = try? JSONSerialization.data(withJSONObject: ["mode": next.rawValue, "session": next == .session])
+        if let body, isPaired { _ = try? await signedStatus(method: "POST", path: "/grant", body: body) }
+        if next != .session { sessionActive = false }
+        if next == .session { sessionActive = true }
+    }
+
+    func revokeAll() async {
+        mode = .ask
+        sessionActive = false
+        if isPaired { _ = try? await signedStatus(method: "POST", path: "/grant", body: Data(#"{"revoke":true}"#.utf8)) }
+    }
+
+    func refreshLog() async {
+        guard isPaired, let (data, _) = try? await signedStatus(method: "GET", path: "/log", body: Data()),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let entries = object["entries"] as? [[String: Any]] else { return }
+        let parsed = entries.suffix(100).map { entry in
+            MacLogEntry(time: entry["time"] as? String ?? "", name: entry["name"] as? String ?? "", message: entry["message"] as? String ?? "")
+        }
+        await MainActor.run { self.log = parsed.reversed() }
+    }
+
+    func setGroup(_ key: String, _ value: Bool) async {
+        guard let group = MacCapabilities.groups.first(where: { $0.key == key }) else { return }
+        for name in group.names { permissions[name] = value }
+        guard isPaired else { return }
+        var body: [String: Any] = [:]
+        for name in group.names { body[name] = value }
+        if let data = try? JSONSerialization.data(withJSONObject: body) {
+            _ = try? await signedStatus(method: "POST", path: "/permissions", body: data)
+        }
+    }
+
+    func groupOn(_ key: String) -> Bool {
+        guard let group = MacCapabilities.groups.first(where: { $0.key == key }) else { return false }
+        return group.names.allSatisfy { permissions[$0] == true }
     }
 
     func setPermission(_ key: String, _ value: Bool) async {
@@ -167,24 +257,36 @@ final class MacConnection: NSObject, ObservableObject, NetServiceBrowserDelegate
     func refreshPermissions() async {
         guard isPaired, let data = try? await signed(method: "GET", path: "/permissions", body: Data()) else { return }
         if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            var next: [String: Bool] = [:]
+            var flags: [String: Bool] = [:]
             for (key, value) in object {
-                if let flag = value as? Bool { next[key] = flag }
+                if let flag = value as? Bool { flags[key] = flag }
             }
-            await MainActor.run { self.permissions = next }
+            let parsedMode = MacGrantMode(rawValue: object["mode"] as? String ?? "ask") ?? .ask
+            let snapshot = flags
+            await MainActor.run {
+                self.permissions = snapshot
+                self.mode = parsedMode
+            }
         }
     }
 
     private func signed(method: String, path: String, body: Data) async throws -> Data {
+        let (data, _) = try await signedStatus(method: method, path: path, body: body)
+        return data
+    }
+
+    private func signedStatus(method: String, path: String, body: Data) async throws -> (Data, Int) {
         guard let token = TokenBox.load() else { throw URLError(.userAuthenticationRequired) }
         return try await send(host: host, port: port, method: method, path: path, body: body, token: token)
     }
 
     private func send(peer: MacPeer, method: String, path: String, body: Data, signed: Bool) async throws -> Data {
-        try await send(host: peer.host, port: peer.port, method: method, path: path, body: body, token: signed ? TokenBox.load() : nil)
+        let (data, status) = try await send(host: peer.host, port: peer.port, method: method, path: path, body: body, token: signed ? TokenBox.load() : nil)
+        guard (200...299).contains(status) else { throw URLError(.badServerResponse) }
+        return data
     }
 
-    private func send(host: String, port: Int, method: String, path: String, body: Data, token: String?) async throws -> Data {
+    private func send(host: String, port: Int, method: String, path: String, body: Data, token: String?) async throws -> (Data, Int) {
         guard let url = URL(string: "http://\(host):\(port)\(path)") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -200,8 +302,8 @@ final class MacConnection: NSObject, ObservableObject, NetServiceBrowserDelegate
             request.setValue(Data(mac).hex, forHTTPHeaderField: "X-Vela-Signature")
         }
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw URLError(.badServerResponse) }
-        return data
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        return (data, http.statusCode)
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {

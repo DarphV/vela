@@ -22,6 +22,7 @@ struct SettingsView: View {
     @State private var importing = false
     @State private var macCode = ""
     @State private var pairingPeer: MacPeer?
+    @State private var explainAlways = false
 
     @State private var thumbnails: [VisualDriver] = VelaDesign.allCases.map { VisualDriver.thumbnail(design: $0.rawValue) }
     @State private var voices: [AVSpeechSynthesisVoice] = []
@@ -292,18 +293,74 @@ struct SettingsView: View {
             }
             if model.mac.isPaired {
                 SettingsGroup {
-                    permissionToggle("openApp", "Apps öffnen")
-                    permissionToggle("openURL", "Adressen öffnen")
-                    permissionToggle("shortcut", "Kurzbefehle")
-                    permissionToggle("applescript", "Erlaubte Skripte")
-                    permissionToggle("type", "Text tippen")
-                    permissionToggle("media", "Medien")
-                    permissionToggle("volume", "Lautstärke")
-                    permissionToggle("screenshot", "Screenshot")
-                    permissionToggle("clipboard", "Zwischenablage")
-                    permissionToggle("apps", "Laufende Apps")
+                    VoiceRow(title: "Jedes Mal fragen", subtitle: "Vor jeder Aktion einmal bestätigen",
+                             selected: model.mac.mode == .ask) {
+                        Task { await model.mac.setMode(.ask) }
+                    }
+                    Divider().overlay(Color.white.opacity(0.07))
+                    VoiceRow(title: "Für diese Sitzung erlauben", subtitle: "Bis Vela schließt oder der Mac weg ist",
+                             selected: model.mac.mode == .session && model.mac.sessionActive) {
+                        Task { await model.mac.setMode(.session) }
+                    }
+                    Divider().overlay(Color.white.opacity(0.07))
+                    VoiceRow(title: "Immer erlauben", subtitle: "Die angehakten Aktionen sofort ausführen",
+                             selected: model.mac.mode == .always) {
+                        if UserDefaults.standard.bool(forKey: "vela.mac.alwaysExplained") {
+                            Task { await model.mac.setMode(.always) }
+                        } else {
+                            explainAlways = true
+                        }
+                    }
+                }
+                SettingsGroup {
+                    ForEach(MacCapabilities.groups, id: \.key) { group in
+                        Toggle(isOn: Binding(get: { model.mac.groupOn(group.key) }, set: { value in
+                            Task { await model.mac.setGroup(group.key, value) }
+                        })) {
+                            Text(group.title).velaText(15).foregroundStyle(.white)
+                        }
+                        .toggleStyle(VelaToggleStyle())
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                    }
+                }
+                Button("Alles widerrufen") {
+                    Task { await model.mac.revokeAll() }
+                }
+                .velaText(15.5, weight: .semibold)
+                .foregroundStyle(Color.rgba(185, 160, 255))
+                .padding(.horizontal, 4)
+                if !model.mac.log.isEmpty {
+                    SectionTitle("Letzte Aktionen")
+                    SettingsGroup {
+                        ForEach(model.mac.log) { entry in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.message)
+                                    .velaText(14)
+                                    .foregroundStyle(.white.opacity(0.9))
+                                Text(entry.time)
+                                    .velaText(11.5)
+                                    .foregroundStyle(.white.opacity(0.4))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                        }
+                    }
                 }
             }
+        }
+        .onAppear {
+            if model.mac.isPaired { Task { await model.mac.refreshLog() } }
+        }
+        .alert("Immer erlauben", isPresented: $explainAlways) {
+            Button("Erlauben") {
+                UserDefaults.standard.set(true, forKey: "vela.mac.alwaysExplained")
+                Task { await model.mac.setMode(.always) }
+            }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Vela führt die angehakten Aktionen danach sofort aus und sagt dir Bescheid.")
         }
     }
 

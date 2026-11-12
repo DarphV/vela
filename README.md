@@ -89,7 +89,7 @@ Dokumente (PDF, Text, Markdown, DOCX) werden auf dem Gerät in Abschnitte zerleg
 
 ## Mac-Verbindung
 
-`MacCompanion/` baut den lokalen Dienst `vela-macd` (Artefakt `VelaMac-daemon`). Er meldet sich per Bonjour `_vela._tcp` und spricht nur im eigenen Netz. Kopplung mit einem 6-stelligen Code, danach HMAC. Details und die nötigen macOS-Rechte stehen in `MacCompanion/README.md`. In der App: Einstellungen › Mac-Verbindung. „Öffne Safari auf dem Mac“ geht über das Gehirn; heikle Aktionen fragen vorher nach.
+`MacCompanion/` baut den lokalen Dienst `vela-macd` (Artefakt `VelaMac-daemon`). Er meldet sich per Bonjour `_vela._tcp` und spricht nur im eigenen Netz. Kopplung mit einem 6-stelligen Code, danach HMAC. Details und die nötigen macOS-Rechte stehen in `MacCompanion/README.md`. In der App: Einstellungen › Mac-Verbindung. Dort wählst du „Jedes Mal fragen“, „Für diese Sitzung erlauben“ oder „Immer erlauben“, plus die Fähigkeiten. Der Mac speichert das und setzt es durch. Mit stehender Freigabe führt Vela die Aktion sofort aus und sagt, was sie getan hat.
 
 ## Nächste Schritte
 

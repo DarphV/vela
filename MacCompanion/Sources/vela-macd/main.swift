@@ -1,7 +1,10 @@
+import AppKit
 import CryptoKit
 import Foundation
 import Network
 import Security
+
+if MacCLI.handle(CommandLine.arguments) { exit(0) }
 
 let repair = CommandLine.arguments.contains("--repair")
 let server = VelaMacServer()
@@ -12,11 +15,13 @@ final class VelaMacServer {
     private let queue = DispatchQueue(label: "vela.macd")
     private let store = MacStore()
     private var listener: NWListener?
+    private var localListener: NWListener?
     private let port: UInt16 = 8741
 
     func start(repair: Bool) {
         if repair { store.clearToken() }
         store.ensureDefaults()
+        MenuBar.install(store: store)
         let code = store.pairingCode()
         fputs("Vela Mac\nKopplungscode: \(code)\nDatei: \(store.codeURL.path)\n", stdout)
         fflush(stdout)
@@ -34,10 +39,23 @@ final class VelaMacServer {
             }
             listener.start(queue: queue)
             self.listener = listener
+            startLocalControl()
         } catch {
             fputs("Start fehlgeschlagen: \(error)\n", stderr)
             exit(1)
         }
+    }
+
+    private func startLocalControl() {
+        let parameters = NWParameters.tcp
+        parameters.requiredInterfaceType = .loopback
+        guard let localPort = NWEndpoint.Port(rawValue: 8742),
+              let local = try? NWListener(using: parameters, on: localPort) else { return }
+        local.newConnectionHandler = { [weak self] connection in
+            self?.accept(connection)
+        }
+        local.start(queue: queue)
+        localListener = local
     }
 
     private func accept(_ connection: NWConnection) {
@@ -114,6 +132,17 @@ final class VelaMacServer {
             }
             return (200, #"{"ok":true,"token":"\#(token)"}"#)
         }
+        if path.hasPrefix("/local/") {
+            guard headers["x-vela-local"] == store.localSecret else {
+                return (401, #"{"ok":false,"message":"Nur lokal"}"#)
+            }
+            if path == "/local/grant" {
+                store.applyGrant(body)
+                return (200, store.permissionsJSON())
+            }
+            if path == "/local/log" { return (200, store.logJSON()) }
+            return (404, #"{"ok":false}"#)
+        }
         guard authorized(method: method, path: path, headers: headers, body: body) else {
             return (401, #"{"ok":false,"message":"Nicht gekoppelt"}"#)
         }
@@ -125,8 +154,14 @@ final class VelaMacServer {
         case ("POST", "/permissions"):
             store.updatePermissions(body)
             return (200, store.permissionsJSON())
+        case ("POST", "/grant"):
+            store.applyGrant(body)
+            return (200, store.permissionsJSON())
+        case ("GET", "/log"):
+            return (200, store.logJSON())
         case ("POST", "/unpair"):
             store.clearToken()
+            store.revokeStanding()
             return (200, #"{"ok":true,"message":"Getrennt"}"#)
         case ("POST", "/action"):
             return action(body)
@@ -139,9 +174,19 @@ final class VelaMacServer {
         let name = jsonString(body, key: "name") ?? ""
         let value = jsonString(body, key: "value") ?? ""
         guard store.allows(name) else {
-            return (403, #"{"ok":false,"message":"Diese Berechtigung ist auf dem Mac aus."}"#)
+            let message = "Diese Berechtigung ist auf dem Mac aus."
+            store.appendLog(name: name, value: value, message: message)
+            return (200, #"{"ok":false,"message":"\#(escape(message))"}"#)
+        }
+        let confirmed = jsonBool(body, key: "confirm")
+        let clientSession = jsonBool(body, key: "session")
+        let standing = store.mode() == "always" || (store.mode() == "session" && store.sessionActive && clientSession)
+        if !standing && !confirmed {
+            store.appendLog(name: name, value: value, message: "Bestätigung nötig")
+            return (403, #"{"ok":false,"needConfirm":true,"message":"Bestätigung nötig"}"#)
         }
         let message = MacActions.run(name: name, value: value)
+        store.appendLog(name: name, value: value, message: message)
         return (200, #"{"ok":true,"message":"\#(escape(message))"}"#)
     }
 
@@ -298,16 +343,36 @@ final class MacStore {
     var codeURL: URL { Self.root.appendingPathComponent("pairing-code.txt") }
     private var tokenURL: URL { Self.root.appendingPathComponent("token") }
     private var permissionsURL: URL { Self.root.appendingPathComponent("permissions.json") }
+    private var logURL: URL { Self.root.appendingPathComponent("actions.json") }
+    private var localKeyURL: URL { Self.root.appendingPathComponent("local.key") }
     private let keys = ["openApp", "openURL", "shortcut", "applescript", "type", "media", "volume", "screenshot", "clipboard", "apps"]
+    private(set) var sessionActive = false
+
+    var localSecret: String {
+        if let existing = try? String(contentsOf: localKeyURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           !existing.isEmpty {
+            return existing
+        }
+        let secret = UUID().uuidString
+        try? secret.write(to: localKeyURL, atomically: true, encoding: .utf8)
+        return secret
+    }
+
+    var needsConfirmation: Bool {
+        switch mode() {
+        case "always": return false
+        case "session": return !sessionActive
+        default: return true
+        }
+    }
 
     func ensureDefaults() {
         if !FileManager.default.fileExists(atPath: permissionsURL.path) {
-            var initial: [String: Bool] = [:]
+            var initial: [String: Any] = ["mode": "ask"]
             for key in keys { initial[key] = ["openApp", "media", "volume", "apps"].contains(key) }
-            if let data = try? JSONSerialization.data(withJSONObject: initial) {
-                try? data.write(to: permissionsURL)
-            }
+            writeConfig(initial)
         }
+        _ = localSecret
         _ = Self.scripts
         if token == nil { _ = pairingCode() }
     }
@@ -346,39 +411,231 @@ final class MacStore {
     func clearToken() {
         try? FileManager.default.removeItem(at: tokenURL)
         try? FileManager.default.removeItem(at: codeURL)
+        sessionActive = false
     }
 
     func allows(_ name: String) -> Bool {
         permissions()[name] == true
     }
 
+    func mode() -> String {
+        let raw = config()["mode"] as? String ?? "ask"
+        return ["ask", "session", "always"].contains(raw) ? raw : "ask"
+    }
+
+    func applyGrant(_ body: Data) {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return }
+        var config = config()
+        if let mode = object["mode"] as? String, ["ask", "session", "always"].contains(mode) {
+            config["mode"] = mode
+            if mode != "session" { sessionActive = false }
+        }
+        if let session = object["session"] as? Bool {
+            sessionActive = session && (config["mode"] as? String) == "session"
+        }
+        if object["revoke"] as? Bool == true {
+            revokeStanding()
+            return
+        }
+        writeConfig(config)
+    }
+
+    func revokeStanding() {
+        var config = config()
+        config["mode"] = "ask"
+        sessionActive = false
+        writeConfig(config)
+    }
+
     func permissionsJSON() -> String {
         let map = permissions()
         let parts = keys.map { "\"\($0)\":\(map[$0] == true ? "true" : "false")" }
-        return "{\"ok\":true," + parts.joined(separator: ",") + "}"
+        let session = sessionActive ? "true" : "false"
+        return "{\"ok\":true,\"mode\":\"\(mode())\",\"session\":\(session)," + parts.joined(separator: ",") + "}"
     }
 
     func updatePermissions(_ body: Data) {
-        var map = permissions()
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return }
+        var config = config()
         for key in keys {
-            if let value = object[key] as? Bool { map[key] = value }
+            if let value = object[key] as? Bool { config[key] = value }
         }
-        if let data = try? JSONSerialization.data(withJSONObject: map) {
+        writeConfig(config)
+    }
+
+    func appendLog(name: String, value: String, message: String) {
+        var entries = loadLog()
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        entries.append(["time": stamp, "name": name, "value": String(value.prefix(80)), "message": String(message.prefix(240))])
+        if entries.count > 100 { entries.removeFirst(entries.count - 100) }
+        if let data = try? JSONSerialization.data(withJSONObject: entries, options: [.prettyPrinted]) {
+            try? data.write(to: logURL)
+        }
+    }
+
+    func logJSON() -> String {
+        let entries = loadLog()
+        guard let data = try? JSONSerialization.data(withJSONObject: ["ok": true, "entries": entries]),
+              let text = String(data: data, encoding: .utf8) else {
+            return #"{"ok":true,"entries":[]}"#
+        }
+        return text
+    }
+
+    func logText() -> String {
+        loadLog().map { entry in
+            let time = entry["time"] as? String ?? ""
+            let name = entry["name"] as? String ?? ""
+            let message = entry["message"] as? String ?? ""
+            return "\(time)  \(name)  \(message)"
+        }.joined(separator: "\n")
+    }
+
+    private func permissions() -> [String: Bool] {
+        var map: [String: Bool] = [:]
+        for (key, value) in config() {
+            if let flag = value as? Bool { map[key] = flag }
+        }
+        return map
+    }
+
+    private func config() -> [String: Any] {
+        guard let data = try? Data(contentsOf: permissionsURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return ["mode": "ask"] }
+        return object
+    }
+
+    private func writeConfig(_ object: [String: Any]) {
+        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]) {
             try? data.write(to: permissionsURL)
         }
     }
 
-    private func permissions() -> [String: Bool] {
-        guard let data = try? Data(contentsOf: permissionsURL),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Bool] else { return [:] }
-        return object
+    private func loadLog() -> [[String: Any]] {
+        guard let data = try? Data(contentsOf: logURL),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return entries
+    }
+}
+
+enum MacCLI {
+    static func handle(_ arguments: [String]) -> Bool {
+        let args = Array(arguments.dropFirst())
+        guard args.contains("--grant") || args.contains("--revoke") || args.contains("--log")
+                || args.contains("--allow") || args.contains("--deny") else { return false }
+        let store = MacStore()
+        store.ensureDefaults()
+        if args.contains("--log") {
+            print(store.logText())
+            return true
+        }
+        if args.contains("--revoke") {
+            store.revokeStanding()
+            post(["revoke": true])
+            print("Stehende Freigabe widerrufen. Es wird wieder jedes Mal gefragt.")
+            return true
+        }
+        if let mode = value("--grant", args), ["ask", "session", "always"].contains(mode) {
+            store.applyGrant(Data("{\"mode\":\"\(mode)\",\"session\":\(mode == "session" ? "true" : "false")}".utf8))
+            post(["mode": mode, "session": mode == "session"])
+            print("Modus: \(mode)")
+            return true
+        }
+        if let name = value("--allow", args) ?? value("--deny", args) {
+            let on = args.contains("--allow")
+            guard let keys = groups[name] else {
+                print("Unbekannt. Gruppen: \(groups.keys.sorted().joined(separator: ", "))")
+                return true
+            }
+            var body: [String: Any] = [:]
+            for key in keys { body[key] = on }
+            store.updatePermissions(try! JSONSerialization.data(withJSONObject: body))
+            print("\(name): \(on ? "an" : "aus")")
+            return true
+        }
+        return false
+    }
+
+    static let groups = [
+        "apps": ["openApp", "openURL", "apps"],
+        "typing": ["type"],
+        "scripts": ["shortcut", "applescript"],
+        "media": ["media", "volume"],
+        "screenshot": ["screenshot"],
+        "clipboard": ["clipboard"]
+    ]
+
+    private static func value(_ flag: String, _ args: [String]) -> String? {
+        guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
+        return args[index + 1]
+    }
+
+    private static func post(_ object: [String: Any]) {
+        let store = MacStore()
+        guard let url = URL(string: "http://127.0.0.1:8742/local/grant"),
+              let body = try? JSONSerialization.data(withJSONObject: object) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue(store.localSecret, forHTTPHeaderField: "X-Vela-Local")
+        request.timeoutInterval = 1.5
+        let wait = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: request) { _, _, _ in wait.signal() }.resume()
+        _ = wait.wait(timeout: .now() + 2)
+    }
+}
+
+enum MenuBar {
+    private static var bridge = MenuBridge()
+
+    static func install(store: MacStore) {
+        bridge.store = store
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.title = "Vela"
+        let menu = NSMenu()
+        menu.addItem(item("Jedes Mal fragen", #selector(MenuBridge.ask)))
+        menu.addItem(item("Für diese Sitzung erlauben", #selector(MenuBridge.session)))
+        menu.addItem(item("Immer erlauben", #selector(MenuBridge.always)))
+        menu.addItem(.separator())
+        menu.addItem(item("Alles widerrufen", #selector(MenuBridge.revoke)))
+        menu.addItem(item("Protokoll anzeigen", #selector(MenuBridge.showLog)))
+        item.menu = menu
+        bridge.item = item
+    }
+
+    private static func item(_ title: String, _ action: Selector) -> NSMenuItem {
+        let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        entry.target = bridge
+        return entry
+    }
+}
+
+final class MenuBridge: NSObject {
+    var store = MacStore()
+    weak var item: NSStatusItem?
+
+    @objc func ask() { store.applyGrant(Data(#"{"mode":"ask","session":false}"#.utf8)) }
+    @objc func session() { store.applyGrant(Data(#"{"mode":"session","session":true}"#.utf8)) }
+    @objc func always() { store.applyGrant(Data(#"{"mode":"always","session":false}"#.utf8)) }
+    @objc func revoke() { store.revokeStanding() }
+    @objc func showLog() {
+        let alert = NSAlert()
+        alert.messageText = "Vela · letzte Aktionen"
+        alert.informativeText = store.logText().isEmpty ? "Noch nichts." : store.logText()
+        alert.runModal()
     }
 }
 
 func jsonString(_ data: Data, key: String) -> String? {
     guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
     return object[key] as? String
+}
+
+func jsonBool(_ data: Data, key: String) -> Bool {
+    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+    return object[key] as? Bool ?? false
 }
 
 func escape(_ text: String) -> String {

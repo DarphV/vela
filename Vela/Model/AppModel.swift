@@ -81,8 +81,8 @@ final class AppModel: ObservableObject {
         mac.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.objectWillChange.send() }
         }.store(in: &cancellables)
-        brain.onMacAction = { [weak self] action in
-            self?.handleMac(action)
+        brain.performMac = { [weak self] action in
+            await self?.resolveMac(action) ?? "Der Mac ist nicht verbunden."
         }
         prepareScreenshotIfNeeded()
     }
@@ -473,30 +473,36 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(true, forKey: VelaSettings.swipeHintKey)
     }
 
-    func handleMac(_ action: MacAction) {
-        guard mac.isPaired else {
-            showToast("Zuerst den Mac unter Einstellungen koppeln.")
-            return
+    func resolveMac(_ action: MacAction) async -> String {
+        guard mac.isPaired else { return "Zuerst den Mac unter Einstellungen koppeln." }
+        if !mac.isOn(action.name) {
+            return "Diese Berechtigung ist auf dem Mac aus."
         }
-        if action.risky {
+        if mac.needsConfirmation(action.name) {
             pendingMacAction = action
-        } else {
-            Task { await runMac(action) }
+            return "Bitte einmal auf dem iPhone bestätigen."
         }
+        let result = await mac.perform(action, confirm: false)
+        if result == "CONFIRM" {
+            pendingMacAction = action
+            return "Bitte einmal auf dem iPhone bestätigen."
+        }
+        return result
     }
 
     func approvePendingMac() {
         guard let action = pendingMacAction else { return }
         pendingMacAction = nil
-        Task { await runMac(action) }
+        Task { await reportMac(action) }
     }
 
-    private func runMac(_ action: MacAction) async {
-        let result = await mac.perform(action)
+    private func reportMac(_ action: MacAction) async {
+        let result = await mac.perform(action, confirm: true)
         showToast(result)
         if mode == .chat {
             messages.append(.assistant(VelaAnswer(blocks: [.paragraph(result)], spoken: result, sources: [], isDemo: false)))
-        } else if VelaSettings.ttsEnabled {
+        }
+        if mode != .chat, VelaSettings.ttsEnabled {
             voice.enqueue(result, voiceID: VelaSettings.voiceID)
         }
     }
