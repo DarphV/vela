@@ -198,7 +198,6 @@ final class ModelStore: ObservableObject {
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file
         formatter.includesUnit = true
-        formatter.locale = Locale(identifier: "de_DE")
         return formatter.string(fromByteCount: max(0, bytes))
     }
 }
