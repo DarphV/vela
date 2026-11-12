@@ -493,6 +493,48 @@ def write_export_options(team):
     print("ExportOptions: method app-store-connect, destination upload, signingStyle manual, App Store profile.")
 
 
+def patch_app_signing(team):
+    """Put the App Store profile on the app target only. A command-line specifier also hits Swift packages, which cannot use it."""
+    path = "Vela.xcodeproj/project.pbxproj"
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    pieces = text.split("isa = XCBuildConfiguration;")
+    rebuilt = [pieces[0]]
+    patched = 0
+    for piece in pieces[1:]:
+        if "PRODUCT_BUNDLE_IDENTIFIER = de.barczewski.vela;" in piece:
+            piece, _ = re.subn(r"CODE_SIGN_STYLE = [^;]+;", "CODE_SIGN_STYLE = Manual;", piece)
+            piece, _ = re.subn(r"DEVELOPMENT_TEAM = [^;]+;", f"DEVELOPMENT_TEAM = {team};", piece)
+            piece, _ = re.subn(r'CODE_SIGN_IDENTITY = [^;]+;', 'CODE_SIGN_IDENTITY = "Apple Distribution";', piece)
+            piece, _ = re.subn(
+                r'PROVISIONING_PROFILE_SPECIFIER = [^;]+;',
+                'PROVISIONING_PROFILE_SPECIFIER = "Vela App Store";',
+                piece,
+            )
+            extra = []
+            if "CODE_SIGN_STYLE = Manual;" not in piece:
+                extra.append("CODE_SIGN_STYLE = Manual;")
+            if f"DEVELOPMENT_TEAM = {team};" not in piece:
+                extra.append(f"DEVELOPMENT_TEAM = {team};")
+            if 'CODE_SIGN_IDENTITY = "Apple Distribution";' not in piece:
+                extra.append('CODE_SIGN_IDENTITY = "Apple Distribution";')
+            if 'PROVISIONING_PROFILE_SPECIFIER = "Vela App Store";' not in piece:
+                extra.append('PROVISIONING_PROFILE_SPECIFIER = "Vela App Store";')
+            if extra:
+                piece = piece.replace(
+                    "PRODUCT_BUNDLE_IDENTIFIER = de.barczewski.vela;",
+                    "PRODUCT_BUNDLE_IDENTIFIER = de.barczewski.vela;\n\t\t\t\t" + "\n\t\t\t\t".join(extra),
+                    1,
+                )
+            patched += 1
+        rebuilt.append("isa = XCBuildConfiguration;" + piece)
+    if patched == 0:
+        fail("Could not find the Vela target in the Xcode project to attach the App Store profile.")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("".join(rebuilt))
+    print(f"App target uses the App Store profile ({patched} configuration(s)).")
+
+
 def prepare():
     write_key()
     team = resolve_team()
@@ -501,6 +543,7 @@ def prepare():
     team = issue_app_store_signing(team)
     with open(os.path.join(env("ASC_DIR"), "team_id"), "w", encoding="ascii") as handle:
         handle.write(team + "\n")
+    patch_app_signing(team)
     write_export_options(team)
     print("No app extensions. App Intents use " + BUNDLE_ID + ".")
 

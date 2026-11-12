@@ -103,16 +103,10 @@ run_logged xcodebuild \
   -derivedDataPath "${ASC_DIR}/DerivedData" \
   -skipPackagePluginValidation \
   -skipMacroValidation \
-  -allowProvisioningUpdates \
   -authenticationKeyPath "$KEY_PATH" \
   -authenticationKeyID "$ASC_KEY_ID" \
   -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
   CURRENT_PROJECT_VERSION="$BUILD" \
-  PRODUCT_BUNDLE_IDENTIFIER="de.barczewski.vela" \
-  DEVELOPMENT_TEAM="$TEAM" \
-  CODE_SIGN_STYLE=Manual \
-  CODE_SIGN_IDENTITY="Apple Distribution" \
-  PROVISIONING_PROFILE_SPECIFIER="Vela App Store" \
   CODE_SIGNING_ALLOWED=YES \
   CODE_SIGNING_REQUIRED=YES \
   archive
