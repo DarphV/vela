@@ -25,6 +25,8 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Vela hört dir zu, wenn du im Sprachmodus mit ihr sprichst. Die Sprache wird nur zur Erkennung deiner Frage verwendet und nicht gespeichert.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
