@@ -30,7 +30,7 @@ beim Antippen in den **Glas-Chat**, zeigt zu jeder Antwort die **Quelle** und l�
 vela-ios/
 ├─ project.yml                  XcodeGen-Projektbeschreibung (daraus entsteht Vela.xcodeproj)
 ├─ Support/Info.plist           wird von XcodeGen erzeugt (deutsche Texte für Mikrofon/Sprache)
-├─ .github/workflows/ios-build.yml   Cloud-Build auf einem GitHub-Mac → unsignierte .ipa
+├─ .github/workflows/ios-build.yml   Cloud-Build → unsignierte .ipa und TestFlight
 └─ Vela/
    ├─ App/VelaApp.swift         Einstieg
    ├─ Model/                    AppModel (Ablauf Sprachmodus ⇄ Chat), Nachrichten, Einstellungen
@@ -51,6 +51,14 @@ vela-ios/
    **ohne Signatur**.
 3. Nach ca. 5–10 Minuten unter dem Lauf bei **Artifacts** `Vela-unsigned-ipa` herunterladen und
    entpacken → `Vela-unsigned.ipa`.
+4. Derselbe Workflow startet parallel **Vela (TestFlight)**. Der Job signiert in der Cloud
+   mit den Secrets `ASC_ISSUER_ID`, `ASC_KEY_ID` und `ASC_PRIVATE_KEY` (komplette `.p8`)
+   und lädt nach App Store Connect hoch. Die Build-Nummer ist `github.run_number`,
+   die Bundle-ID `de.barczewski.vela` (App Intents ohne eigene Extension).
+   `ITSAppUsesNonExemptEncryption` ist aus. Fehlt der App-Eintrag, in App Store Connect
+   eine App anlegen: Name **Vela**, Bundle-ID **de.barczewski.vela**, SKU **vela**.
+   Kann die Team-ID nicht aus dem Schlüssel gelesen werden, zusätzlich das Secret
+   `DEVELOPMENT_TEAM` (10 Zeichen, Mitgliedschaft) setzen.
 
 ## Auf das iPhone bringen (Sideloadly, kostenlose Apple-ID)
 

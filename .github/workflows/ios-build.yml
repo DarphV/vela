@@ -1,6 +1,6 @@
-# Baut Vela in der Cloud auf einem GitHub-Mac (kein eigener Mac nötig) und
-# liefert eine UNSIGNIERTE .ipa als Artefakt. Signiert wird beim Installieren
-# mit Sideloadly + kostenloser Apple-ID (siehe README).
+# Baut Vela in der Cloud auf einem GitHub-Mac (kein eigener Mac nötig).
+# Der Job "unsigned" liefert eine unsignierte .ipa. Der Job "testflight"
+# signiert automatisch mit dem App-Store-Connect-API-Schlüssel und lädt hoch.
 name: iOS Build
 
 on:
@@ -117,4 +117,52 @@ jobs:
         with:
           name: build-log
           path: build.log
+          if-no-files-found: ignore
+
+  testflight:
+    name: Vela (TestFlight)
+    runs-on: macos-15
+    timeout-minutes: 90
+    # Fork-PRs haben die Secrets nicht. Push, workflow_dispatch und PRs aus diesem Repo schon.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode wählen (neuestes 26.x, sonst 16.x)
+        run: |
+          set -euo pipefail
+          ls -d /Applications/Xcode*.app || true
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "${XC}" ]; then
+            XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          fi
+          if [ -z "${XC}" ]; then XC=/Applications/Xcode.app; fi
+          echo "Using ${XC}"
+          sudo xcode-select -s "${XC}/Contents/Developer"
+          xcodebuild -version
+
+      - name: XcodeGen installieren
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Xcode-Projekt erzeugen
+        run: xcodegen generate
+
+      - name: Signieren und zu TestFlight hochladen
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+        run: bash scripts/asc-testflight.sh
+
+      - name: TestFlight-Log bei Fehler hochladen
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testflight-log
+          path: testflight.log
           if-no-files-found: ignore
