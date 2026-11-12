@@ -121,6 +121,12 @@ struct RootView: View {
                     .transition(.opacity)
                     .zIndex(9)
             }
+
+            if model.models.safeMode && !model.showSplash {
+                ModelSafeModeView()
+                    .transition(.opacity)
+                    .zIndex(8)
+            }
         }
         .preferredColorScheme(.dark)
         .statusBarHidden(false)

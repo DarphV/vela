@@ -64,6 +64,8 @@ final class VisualDriver {
     var design: Int = 0
     var micActive = false
     var reduceMotion = false
+    /// While the language model is moving onto the GPU, the visual stays cheap.
+    var heavyWork = false
     /// Returns the current microphone level 0...1 (read every frame while listening).
     var levelProvider: (() -> Float)?
 

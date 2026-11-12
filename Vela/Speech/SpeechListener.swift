@@ -18,11 +18,17 @@ final class SpeechListener {
     enum ListenerError: LocalizedError {
         case recognizerUnavailable
         case noMicrophone
+        case microphoneDenied
+        case permissionNeeded
+        case sessionFailed
 
         var errorDescription: String? {
             switch self {
             case .recognizerUnavailable: return "Spracherkennung gerade nicht verfügbar"
             case .noMicrophone: return "Kein Mikrofon gefunden"
+            case .microphoneDenied: return "Mikrofon nicht erlaubt"
+            case .permissionNeeded: return "Mikrofonfreigabe fehlt noch"
+            case .sessionFailed: return "Audiositzung konnte nicht gestartet werden"
             }
         }
     }
@@ -87,9 +93,38 @@ final class SpeechListener {
     func start(hints: [String] = []) throws {
         if isRunning { return }
         stopRecognition()
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            break
+        case .undetermined:
+            throw ListenerError.permissionNeeded
+        case .denied:
+            throw ListenerError.microphoneDenied
+        @unknown default:
+            throw ListenerError.microphoneDenied
+        }
+        guard AudioSessionManager.activate() else { throw ListenerError.sessionFailed }
         guard let recognizer, recognizer.isAvailable else { throw ListenerError.recognizerUnavailable }
-        prepareGraph()
-        armVoiceProcessing()
+
+        var lastError: Error = ListenerError.noMicrophone
+        for voiceProcessing in [true, false] {
+            do {
+                try startGraph(hints: hints, voiceProcessing: voiceProcessing, recognizer: recognizer)
+                return
+            } catch {
+                lastError = error
+                dismantleGraph()
+            }
+        }
+        throw lastError
+    }
+
+    private func startGraph(hints: [String], voiceProcessing: Bool, recognizer: SFSpeechRecognizer) throws {
+        if let error = VelaSetVoiceProcessing(engine, voiceProcessing) {
+            if voiceProcessing { throw error }
+        }
+        voiceProcessingArmed = voiceProcessing
+        try connectPlayer()
 
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -107,21 +142,16 @@ final class SpeechListener {
             req.contextualStrings = Array(terms.prefix(40))
         }
 
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+        if let error = VelaInstallInputTap(engine, format, { [weak self] buffer in
             req.append(buffer)
             self?.measure(buffer)
+        }) {
+            throw error
         }
         tapInstalled = true
 
-        engine.prepare()
-        if !engine.isRunning {
-            do {
-                try engine.start()
-            } catch {
-                stop()
-                throw error
-            }
-        }
+        if let error = VelaAudioEnginePrepare(engine) { throw error }
+        if !engine.isRunning, let error = VelaAudioEngineStart(engine) { throw error }
 
         generation += 1
         let gen = generation
@@ -132,7 +162,7 @@ final class SpeechListener {
                 self.onResult?(result.bestTranscription.formattedString, result.isFinal)
             }
             if error != nil || (result?.isFinal ?? false) {
-                self.generation += 1   // report the end only once
+                self.generation += 1
                 self.onEnd?(error)
             }
         }
@@ -163,11 +193,11 @@ final class SpeechListener {
     /// Schedules synthesized speech on the same engine the mic uses, so voice processing can cancel the echo.
     @discardableResult
     func scheduleSpeech(_ buffer: AVAudioPCMBuffer, played: @escaping () -> Void) -> Bool {
-        prepareGraph()
+        do { try connectPlayer() } catch { return false }
         guard let playable = convert(buffer, to: playbackFormat), playable.frameLength > 0 else { return false }
         if !engine.isRunning {
-            engine.prepare()
-            do { try engine.start() } catch { return false }
+            if VelaAudioEnginePrepare(engine) != nil { return false }
+            if VelaAudioEngineStart(engine) != nil { return false }
         }
         if !player.isPlaying { player.play() }
         notePlaybackLevel(Self.rmsLevel(buffer))
@@ -211,21 +241,36 @@ final class SpeechListener {
         levelLock.unlock()
     }
 
-    private func prepareGraph() {
+    private func connectPlayer() throws {
         guard !playerReady else { return }
         engine.attach(player)
-        engine.prepare()
         let format = engine.mainMixerNode.outputFormat(forBus: 0)
-        let usable = format.sampleRate > 0 ? format : AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)
+        let usable = (format.sampleRate > 0 && format.channelCount > 0)
+            ? format
+            : AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)
+        guard let usable else { throw ListenerError.sessionFailed }
         playbackFormat = usable
         engine.connect(player, to: engine.mainMixerNode, format: usable)
         playerReady = true
     }
 
-    private func armVoiceProcessing() {
-        guard !voiceProcessingArmed else { return }
-        voiceProcessingArmed = true
-        try? engine.inputNode.setVoiceProcessingEnabled(true)
+    private func dismantleGraph() {
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        if engine.isRunning { engine.stop() }
+        if playerReady {
+            player.stop()
+            engine.disconnectNodeOutput(player)
+            engine.detach(player)
+            playerReady = false
+            playbackFormat = nil
+        }
+        voiceProcessingArmed = false
+        isRunning = false
+        request = nil
+        task = nil
     }
 
     private func convert(_ buffer: AVAudioPCMBuffer, to format: AVAudioFormat?) -> AVAudioPCMBuffer? {

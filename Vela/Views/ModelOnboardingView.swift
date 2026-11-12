@@ -139,3 +139,46 @@ struct ModelOnboardingView: View {
         }
     }
 }
+
+struct ModelSafeModeView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Sicherheitsmodus")
+                    .velaText(28, weight: .semibold)
+                    .foregroundStyle(.white)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Das Modell hat die App beim letzten Laden beendet. Es wird nicht automatisch geladen.")
+                    .velaText(16)
+                    .foregroundStyle(.white.opacity(0.78))
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    Haptics.light()
+                    model.retryModelLoad()
+                } label: {
+                    Text("Erneut versuchen")
+                        .velaText(17, weight: .semibold)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .background(Theme.accentGradient, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                Button {
+                    model.continueInTextMode()
+                } label: {
+                    Text("Im Textmodus weiter")
+                        .velaText(15.5, weight: .semibold)
+                        .foregroundStyle(Color.rgba(185, 160, 255))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(24)
+            .velaGlass(RoundedRectangle(cornerRadius: 28, style: .continuous), tint: Theme.sheetTint)
+            .padding(.horizontal, 22)
+        }
+    }
+}

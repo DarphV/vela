@@ -61,7 +61,10 @@ struct VelaMetalView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
-        if view.preferredFramesPerSecond != preferredFPS {
+        if driver.heavyWork {
+            if view.contentScaleFactor != 1 { view.contentScaleFactor = 1 }
+            if view.preferredFramesPerSecond != 15 { view.preferredFramesPerSecond = 15 }
+        } else if view.preferredFramesPerSecond != preferredFPS {
             view.preferredFramesPerSecond = preferredFPS
         }
         if driver.isStatic {

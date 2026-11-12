@@ -2,29 +2,26 @@
 //  AudioSessionManager.swift
 //  Vela
 //
-//  One audio session for listening + speaking. voiceChat enables the system
-//  echo canceller so Vela can keep the mic open while she talks. AirPlay and
-//  Bluetooth HFP stay available for the route.
+//  One audio session for listening + speaking. Activate this before the
+//  AVAudioEngine graph is built. voiceChat enables echo cancellation.
+//  defaultToSpeaker, Bluetooth A2DP and AirPlay keep playback off the earpiece.
 //
 
 import AVFoundation
 
 enum AudioSessionManager {
-    private static var configured = false
-
-    static func activate() {
+    @discardableResult
+    static func activate() -> Bool {
         let session = AVAudioSession.sharedInstance()
         do {
-            if !configured {
-                // voiceChat turns on echo cancellation so Vela can keep listening while she speaks.
-                try session.setCategory(.playAndRecord,
-                                        mode: .voiceChat,
-                                        options: [.defaultToSpeaker, .allowAirPlay, .allowBluetoothHFP])
-                configured = true
-            }
+            try session.setCategory(.playAndRecord,
+                                    mode: .voiceChat,
+                                    options: [.defaultToSpeaker, .allowBluetoothA2DP, .allowAirPlay])
             try session.setActive(true, options: [])
+            return true
         } catch {
             print("[Vela] AudioSession-Fehler: \(error)")
+            return false
         }
     }
 

@@ -14,8 +14,29 @@
 
 import Foundation
 import Hub
+import MLX
 import MLXLLM
 import MLXLMCommon
+
+enum ModelStoreError: LocalizedError {
+    case safeMode
+    case corrupt
+
+    var errorDescription: String? {
+        switch self {
+        case .safeMode: return "Das Modell hat die App beim letzten Laden beendet."
+        case .corrupt: return "Die Modelldatei ist unvollständig und wird neu geladen."
+        }
+    }
+}
+
+enum MLXMemoryLimits {
+    /// Keep MLX from holding a huge GPU cache beside the Metal nebula.
+    static func apply() {
+        GPU.set(cacheLimit: 16 * 1024 * 1024)
+        GPU.set(memoryLimit: 1_200 * 1024 * 1024, relaxed: true)
+    }
+}
 
 @MainActor
 final class ModelStore: ObservableObject {
@@ -34,9 +55,14 @@ final class ModelStore: ObservableObject {
     @Published private(set) var fraction: Double = 0
     @Published private(set) var completedBytes: Int64 = 0
     @Published private(set) var totalBytes: Int64 = 0
+    /// Set when the previous process died while the weights were loading.
+    @Published private(set) var safeMode = false
+    /// Lowers the Metal visual while weights move onto the GPU.
+    var onHeavyWork: ((Bool) -> Void)?
 
     private var container: ModelContainer?
     private var loadTask: Task<ModelContainer, Error>?
+    private var downloadTask: Task<Void, Error>?
     private let configuration = ModelConfiguration(
         id: ModelStore.repoID,
         extraEOSTokens: ["<|im_end|>", "<|endoftext|>"]
@@ -67,6 +93,18 @@ final class ModelStore: ObservableObject {
 
     init() {
         ModelProgressRelay.shared.store = self
+        if UserDefaults.standard.bool(forKey: VelaSettings.modelLoadGuardKey) {
+            safeMode = true
+            phase = .failed("Das Modell hat die App beim letzten Laden beendet.")
+            detail = "Sicherheitsmodus · das Modell wird nicht automatisch geladen"
+            return
+        }
+        if hasModelFiles && !filesLookValid() {
+            removeModelFiles()
+            phase = .missing
+            detail = "Die Modelldatei war beschädigt und wurde entfernt."
+            return
+        }
         if isInstalled {
             phase = .ready
             detail = "Bereit · \(Self.format(directorySize(modelDirectory)))"
@@ -74,36 +112,54 @@ final class ModelStore: ObservableObject {
     }
 
     func download() {
-        guard loadTask == nil else { return }
+        guard downloadTask == nil, loadTask == nil else { return }
+        safeMode = false
         phase = .downloading(0)
         fraction = 0
         completedBytes = 0
         totalBytes = 0
         detail = "Verbindung …"
-        loadTask = Task { [weak self] in
+        downloadTask = Task { [weak self] in
             guard let self else { throw CancellationError() }
-            return try await self.load(reporting: true)
+            try await self.downloadFiles()
         }
         Task { [weak self] in
             guard let self else { return }
             do {
-                self.container = try await self.loadTask?.value
-                self.loadTask = nil
+                try await self.downloadTask?.value
+                self.downloadTask = nil
+                if !self.filesLookValid() {
+                    self.removeModelFiles()
+                    self.phase = .failed("Die Modelldatei ist unvollständig.")
+                    self.detail = "Erneut versuchen lädt sie neu."
+                    return
+                }
                 self.phase = .ready
                 self.fraction = 1
                 self.detail = "Bereit · \(Self.format(self.directorySize(self.modelDirectory)))"
             } catch is CancellationError {
-                self.loadTask = nil
+                self.downloadTask = nil
             } catch {
-                self.loadTask = nil
-                self.container = nil
+                self.downloadTask = nil
                 self.phase = .failed(error.localizedDescription)
                 self.detail = "Download unterbrochen. Erneut versuchen setzt ihn fort."
             }
         }
     }
 
+    func clearSafeModeForRetry() {
+        safeMode = false
+        UserDefaults.standard.set(false, forKey: VelaSettings.modelLoadGuardKey)
+    }
+
+    /// Hides the safe-mode card for this launch. The guard stays set until a load succeeds.
+    func dismissSafeModeKeepingGuard() {
+        safeMode = false
+    }
+
     func cancelDownload() {
+        downloadTask?.cancel()
+        downloadTask = nil
         loadTask?.cancel()
         loadTask = nil
         if isInstalled {
@@ -117,9 +173,13 @@ final class ModelStore: ObservableObject {
     }
 
     func delete() {
+        downloadTask?.cancel()
+        downloadTask = nil
         loadTask?.cancel()
         loadTask = nil
         container = nil
+        endLoadGuard()
+        safeMode = false
         try? FileManager.default.removeItem(at: modelDirectory)
         if let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
            let items = try? FileManager.default.contentsOfDirectory(at: caches, includingPropertiesForKeys: nil) {
@@ -134,33 +194,47 @@ final class ModelStore: ObservableObject {
     }
 
     func container() async throws -> ModelContainer {
+        if safeMode { throw ModelStoreError.safeMode }
+        if hasModelFiles && !filesLookValid() {
+            removeModelFiles()
+            phase = .missing
+            detail = "Die Modelldatei war beschädigt und wurde entfernt."
+            throw ModelStoreError.corrupt
+        }
         if let container { return container }
         if let loadTask { return try await loadTask.value }
+        onHeavyWork?(true)
+        beginLoadGuard()
         phase = .downloading(max(fraction, 0.02))
-        detail = isInstalled ? "Modell wird vorbereitet …" : detail
-        let task = Task { [weak self] in
-            guard let self else { throw CancellationError() }
-            return try await self.load(reporting: !self.isInstalled)
+        detail = "Modell wird vorbereitet …"
+        let task = Task.detached(priority: .userInitiated) {
+            try await ModelStore.loadContainerOffMain()
         }
         loadTask = task
         do {
             let value = try await task.value
             container = value
             loadTask = nil
+            endLoadGuard()
+            onHeavyWork?(false)
             phase = .ready
             fraction = 1
             detail = "Bereit · \(Self.format(directorySize(modelDirectory)))"
             return value
         } catch {
             loadTask = nil
+            container = nil
+            endLoadGuard()
+            onHeavyWork?(false)
             throw error
         }
     }
 
-    private func load(reporting: Bool) async throws -> ModelContainer {
+    /// Downloads the weight files only. The GPU load happens later, off the main thread.
+    private func downloadFiles() async throws {
         let hub = HubApi(downloadBase: VelaPaths.modelDownloadBase, cache: nil)
-        return try await LLMModelFactory.shared.loadContainer(hub: hub, configuration: configuration) { progress in
-            guard reporting else { return }
+        let repo = Hub.Repo(id: Self.repoID)
+        _ = try await hub.snapshot(from: repo, matching: ["*.safetensors", "*.json", "tokenizer*", "*.model", "*.txt"]) { progress in
             let fraction = progress.fractionCompleted
             let completed = progress.completedUnitCount
             let total = progress.totalUnitCount
@@ -168,6 +242,49 @@ final class ModelStore: ObservableObject {
                 ModelProgressRelay.shared.apply(fraction: fraction, completed: completed, total: total)
             }
         }
+    }
+
+    private static func loadContainerOffMain() async throws -> ModelContainer {
+        MLXMemoryLimits.apply()
+        let configuration = ModelConfiguration(
+            id: repoID,
+            extraEOSTokens: ["<|im_end|>", "<|endoftext|>"]
+        )
+        let hub = HubApi(downloadBase: VelaPaths.modelDownloadBase, cache: nil)
+        return try await LLMModelFactory.shared.loadContainer(hub: hub, configuration: configuration) { _ in }
+    }
+
+    private var hasModelFiles: Bool {
+        FileManager.default.fileExists(atPath: modelDirectory.appendingPathComponent("config.json").path)
+    }
+
+    private func filesLookValid() -> Bool {
+        let directory = modelDirectory
+        let config = directory.appendingPathComponent("config.json")
+        guard fileSize(config) > 32 else { return false }
+        guard let items = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey]) else {
+            return false
+        }
+        return items.contains { item in
+            item.lastPathComponent.contains("safetensors") && fileSize(item) > 5_000_000
+        }
+    }
+
+    private func fileSize(_ url: URL) -> Int64 {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        return Int64(values?.fileSize ?? 0)
+    }
+
+    private func removeModelFiles() {
+        try? FileManager.default.removeItem(at: modelDirectory)
+    }
+
+    private func beginLoadGuard() {
+        UserDefaults.standard.set(true, forKey: VelaSettings.modelLoadGuardKey)
+    }
+
+    private func endLoadGuard() {
+        UserDefaults.standard.set(false, forKey: VelaSettings.modelLoadGuardKey)
     }
 
     private var modelDirectory: URL {

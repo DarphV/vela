@@ -80,6 +80,9 @@ final class AppModel: ObservableObject {
         voice.onFinish = { [weak self] cancelled in
             self?.speechQueueDrained(cancelled: cancelled)
         }
+        models.onHeavyWork = { [weak self] busy in
+            self?.driver.heavyWork = busy
+        }
 
         store.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.objectWillChange.send() }
@@ -166,11 +169,48 @@ final class AppModel: ObservableObject {
         guard showSplash else { return }
         showSplash = false
         guard ScreenshotLaunch.kind == nil else { return }
+        if models.safeMode {
+            return
+        }
         if needsModelOnboarding {
             showOnboarding = true
             return
         }
         Task { await startVoiceSession() }
+    }
+
+    func retryModelLoad() {
+        models.clearSafeModeForRetry()
+        Task {
+            do {
+                _ = try await models.container()
+                showToast("Das Modell ist bereit.")
+                await startVoiceSession()
+            } catch {
+                showToast("Das Modell konnte nicht geladen werden. Du kannst im Textmodus weiterschreiben.")
+                fallBackFromLocalModel()
+                toChat()
+            }
+        }
+    }
+
+    func continueInTextMode() {
+        models.dismissSafeModeKeepingGuard()
+        fallBackFromLocalModel()
+        toChat()
+    }
+
+    private func fallBackFromLocalModel() {
+        let engine: VelaEngineKind = AppleIntelligenceStatus.isAvailable ? .apple : .demo
+        UserDefaults.standard.set(engine.rawValue, forKey: VelaSettings.engineKey)
+    }
+
+    private func microphoneUnavailable() {
+        driver.micActive = false
+        setState(.idle)
+        subline = "Textmodus"
+        showToast("Das Mikrofon lässt sich nicht starten. Du kannst im Textmodus weiterschreiben.")
+        if mode == .voice { toChat() }
     }
 
     private var needsModelOnboarding: Bool {
@@ -196,6 +236,7 @@ final class AppModel: ObservableObject {
     func sceneBecameActive() {
         guard ScreenshotLaunch.kind == nil else { return }
         AudioSessionManager.activate()
+        if models.safeMode { return }
         if mode == .voice && !showSplash && !showSettings && !showOnboarding {
             Task { await startVoiceSession() }
         }
@@ -228,10 +269,12 @@ final class AppModel: ObservableObject {
         if permission == .unknown {
             permission = await SpeechListener.requestPermissions() ? .granted : .denied
         }
-        AudioSessionManager.activate()
         guard permission == .granted else {
-            setState(.idle)
-            subline = "Mikrofon oder Spracherkennung nicht erlaubt · bitte in den iOS-Einstellungen freigeben"
+            microphoneUnavailable()
+            return
+        }
+        guard AudioSessionManager.activate() else {
+            microphoneUnavailable()
             return
         }
         restartFailures = 0
@@ -262,8 +305,7 @@ final class AppModel: ObservableObject {
         } catch {
             driver.micActive = false
             if !duringSpeech {
-                setState(.idle)
-                subline = error.localizedDescription
+                microphoneUnavailable()
             }
         }
     }

@@ -69,6 +69,17 @@ final class VelaEngine: VelaBrain {
             onUpdate(text)
             return VelaAnswer(blocks: [.paragraph(text)], spoken: text, sources: [], isDemo: false)
         }
+        if resolved == .local && !models.safeMode {
+            do {
+                _ = try await models.container()
+            } catch {
+                let engine: VelaEngineKind = AppleIntelligenceStatus.isAvailable ? .apple : .demo
+                UserDefaults.standard.set(engine.rawValue, forKey: VelaSettings.engineKey)
+                let fallback: any VelaBrain = engine == .apple ? apple : demo
+                let answer = await fallback.streamAnswer(to: question, history: history, onUpdate: onUpdate)
+                return withModelNotice(answer)
+            }
+        }
         let brain: any VelaBrain
         switch resolved {
         case .local: brain = local
@@ -80,6 +91,14 @@ final class VelaEngine: VelaBrain {
         let hinted = withHint(answer)
         onUpdate(VelaPrompt.joined(hinted))
         return hinted
+    }
+
+    private func withModelNotice(_ answer: VelaAnswer) -> VelaAnswer {
+        var copy = answer
+        let notice = "Das lokale Modell konnte nicht geladen werden. Vela antwortet ohne es."
+        copy.blocks.insert(.paragraph(notice), at: 0)
+        copy.spoken = notice + " " + copy.spoken
+        return copy
     }
 
     private func withHint(_ answer: VelaAnswer) -> VelaAnswer {

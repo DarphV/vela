@@ -15,6 +15,7 @@ enum VelaSettings {
     static let engineKey = "vela.engine"        // VelaEngineKind: local, apple, demo
     static let swipeHintKey = "vela.swipeHint"  // Bool: first-launch swipe hint already shown
     static let modelOnboardingKey = "vela.modelOnboarding" // Bool: first-launch model guide finished
+    static let modelLoadGuardKey = "vela.modelLoadGuard"   // Bool: previous process died while loading weights
 
     static var design: Int { UserDefaults.standard.integer(forKey: designKey) }
     static var engine: VelaEngineKind {
