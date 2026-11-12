@@ -251,12 +251,18 @@ def team_by_issuing_certificate():
         print("No distribution certificate could be created to discover the Team ID.")
         print(error_text(json.dumps(payload).encode()))
         return None
-    attributes = ((payload.get("data") or {}).get("attributes") or {})
+    issued = payload.get("data") or {}
+    attributes = issued.get("attributes") or {}
     team = team_in_text(attributes.get("name") or "")
     if not team and attributes.get("certificateContent"):
         team = team_from_certificate(attributes["certificateContent"])
-    if team:
-        print("Issued one Apple Distribution certificate to read the Team ID. Its private key was discarded.")
+    cert_id = issued.get("id")
+    if cert_id:
+        removed, _ = api("DELETE", "/v1/certificates/" + urllib.parse.quote(cert_id))
+        if removed in (200, 202, 204):
+            print("Removed the temporary distribution certificate used only to read the Team ID.")
+        else:
+            print("Could not remove the temporary distribution certificate.")
     return team
 
 
@@ -278,6 +284,74 @@ def resolve_team():
         "(App Store Connect → Benutzer und Zugriffsrechte, Mitgliedschaft, oder\n"
         "developer.apple.com/account → Membership Details).\n"
         "Es wurde kein Zertifikat und kein Profil gefunden, aus dem die Team-ID abgelesen werden kann."
+    )
+
+
+def revoke_unreferenced_distribution_certs():
+    """Drop distribution certs no profile uses. CI has no private key for them, and a keyless cert blocks cloud signing."""
+    status, payload = api("GET", "/v1/profiles?include=certificates&limit=50")
+    if status >= 400:
+        print("Skipping certificate cleanup because profiles could not be listed.")
+        return
+    used = set()
+    for item in payload.get("data") or []:
+        related = ((item.get("relationships") or {}).get("certificates") or {}).get("data") or []
+        for cert in related:
+            if cert.get("id"):
+                used.add(cert["id"])
+    for item in payload.get("included") or []:
+        if item.get("type") == "certificates" and item.get("id"):
+            used.add(item["id"])
+    status, payload = api("GET", "/v1/certificates?limit=200")
+    if status >= 400:
+        return
+    for item in payload.get("data") or []:
+        kind = ((item.get("attributes") or {}).get("certificateType") or "").upper()
+        if "DISTRIBUTION" not in kind:
+            continue
+        cert_id = item.get("id")
+        if not cert_id or cert_id in used:
+            continue
+        removed, _ = api("DELETE", "/v1/certificates/" + urllib.parse.quote(cert_id))
+        if removed in (200, 202, 204):
+            print("Revoked an unused distribution certificate so cloud signing can create one that has a private key.")
+
+
+def ensure_ci_device():
+    """Archive automatic signing asks for a development profile, which Apple will not issue with zero devices."""
+    status, payload = api("GET", "/v1/devices?filter[platform]=IOS&limit=5")
+    if status >= 400:
+        print("Could not list devices.")
+        print(error_text(json.dumps(payload).encode()))
+    elif payload.get("data"):
+        print("An iOS device is already registered.")
+        return
+    # Stable fake UDID. 40 hex chars, then the newer 8-16 form if Apple rejects the first.
+    candidates = (
+        "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678",
+        "00008030-001C7D6E1A88002E",
+    )
+    last = ""
+    for udid in candidates:
+        status, payload = api("POST", "/v1/devices", {
+            "data": {
+                "type": "devices",
+                "attributes": {"name": "Vela CI", "platform": "IOS", "udid": udid},
+            }
+        })
+        if status in (200, 201, 409):
+            print("Registered a CI device so Xcode can create a development profile without a plugged-in iPhone.")
+            return
+        last = error_text(json.dumps(payload).encode())
+        if "duplicate" in last.lower() or "already" in last.lower():
+            print("CI device is already registered.")
+            return
+    print("Could not register a CI device.")
+    print(last)
+    fail(
+        "OWNER ACTION: The team has no iOS device, so Apple will not create a development profile.\n"
+        "Add any iPhone under developer.apple.com/account → Certificates, Identifiers & Profiles → Devices,\n"
+        "or let the API key register one (Admin). Then re-run this workflow."
     )
 
 
@@ -324,6 +398,8 @@ def prepare():
     team = resolve_team()
     with open(os.path.join(env("ASC_DIR"), "team_id"), "w", encoding="ascii") as handle:
         handle.write(team + "\n")
+    revoke_unreferenced_distribution_certs()
+    ensure_ci_device()
     ensure_bundle_id(team)
     write_export_options(team, "app-store-connect")
     print("No app extensions. App Intents use " + BUNDLE_ID + ".")

@@ -65,6 +65,7 @@ run_logged xcodebuild \
   -project Vela.xcodeproj \
   -scheme Vela \
   -configuration Release \
+  -sdk iphoneos \
   -destination 'generic/platform=iOS' \
   -archivePath "$ARCHIVE" \
   -derivedDataPath "${ASC_DIR}/DerivedData" \
