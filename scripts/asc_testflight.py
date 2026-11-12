@@ -763,6 +763,49 @@ def prepare():
     print("No app extensions. App Intents use " + BUNDLE_ID + ".")
 
 
+def recent():
+    """Print the newest TestFlight builds. Does not upload or change certificates."""
+    if not env("KEY_PATH"):
+        os.environ["KEY_PATH"] = os.path.join(tempfile.gettempdir(), "vela-authkey.p8")
+    write_key()
+    query = urllib.parse.urlencode({"filter[bundleId]": BUNDLE_ID, "limit": "5"})
+    status, payload = api("GET", "/v1/apps?" + query)
+    if status >= 400 or not (payload.get("data") or []):
+        print(f"Could not look up the app record (HTTP {status}).")
+        return 1
+    app_id = payload["data"][0]["id"]
+    query = urllib.parse.urlencode({
+        "filter[app]": app_id,
+        "sort": "-uploadedDate",
+        "limit": "8",
+    })
+    status, payload = api("GET", "/v1/builds?" + query)
+    print(f"Recent builds HTTP {status}")
+    if status >= 400:
+        print(error_text(json.dumps(payload).encode()))
+        return 1
+    found = False
+    for item in payload.get("data") or []:
+        attributes = item.get("attributes") or {}
+        version = attributes.get("version")
+        state = attributes.get("processingState")
+        uploaded = attributes.get("uploadedDate")
+        print(f"build {version}: {state} uploaded {uploaded}")
+        if str(version) == "25":
+            found = True
+    if not found:
+        print("Build 25 is not among the newest builds.")
+    upload_status, upload_payload = api("GET", f"/v1/apps/{app_id}/buildUploads?limit=5")
+    print(f"Build uploads HTTP {upload_status}")
+    if upload_status < 400:
+        for item in upload_payload.get("data") or []:
+            attributes = item.get("attributes") or {}
+            version = attributes.get("cfBundleVersion") or attributes.get("version")
+            state = attributes.get("state") or attributes.get("uploadedState")
+            print(f"upload {version}: {state}")
+    return 0 if found else 1
+
+
 def owner_app_record():
     print(
         "OWNER ACTION: In App Store Connect gibt es noch keinen App-Eintrag.\n"
@@ -856,6 +899,8 @@ def main():
     elif command == "poll":
         version = sys.argv[2] if len(sys.argv) > 2 else None
         raise SystemExit(poll(version))
+    elif command == "recent":
+        raise SystemExit(recent())
     elif command == "scrub" and len(sys.argv) == 3:
         scrub(sys.argv[2])
     elif command == "owner-app":

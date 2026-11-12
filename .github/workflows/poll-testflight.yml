@@ -13,9 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Wait until build 25 is VALID
+      - name: List recent TestFlight builds
         env:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
-        run: python3 scripts/asc_testflight.py poll 25
+        run: python3 scripts/asc_testflight.py recent
