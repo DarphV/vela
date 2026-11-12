@@ -20,6 +20,8 @@ mask "${ASC_ISSUER_ID:-}"
 mask "${ASC_KEY_ID:-}"
 mask "${ASC_PRIVATE_KEY:-}"
 mask "${DEVELOPMENT_TEAM:-}"
+mask "${VELA_DIST_P12_BASE64:-}"
+mask "${VELA_DIST_P12_PASSWORD:-}"
 
 LOG="${PWD}/testflight.log"
 : > "$LOG"
@@ -64,20 +66,13 @@ fi
 
 install_signing_assets() {
   local pass decoded uuid
-  pass="$(openssl rand -hex 18)"
+  pass="$(cat "${ASC_DIR}/p12.pass")"
   KEYCHAIN_PATH="${ASC_DIR}/signing.keychain-db"
   security create-keychain -p "$pass" "$KEYCHAIN_PATH"
   security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
   security unlock-keychain -p "$pass" "$KEYCHAIN_PATH"
   security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
   security default-keychain -s "$KEYCHAIN_PATH"
-  if ! openssl pkcs12 -export -legacy \
-      -inkey "${ASC_DIR}/dist.key" -in "${ASC_DIR}/cert.pem" \
-      -out "${ASC_DIR}/dist.p12" -passout pass:"$pass"; then
-    openssl pkcs12 -export \
-      -inkey "${ASC_DIR}/dist.key" -in "${ASC_DIR}/cert.pem" \
-      -out "${ASC_DIR}/dist.p12" -passout pass:"$pass"
-  fi
   security import "${ASC_DIR}/dist.p12" -k "$KEYCHAIN_PATH" -P "$pass" -A -t cert -t priv -f pkcs12
   security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pass" "$KEYCHAIN_PATH" >/dev/null
   decoded="${ASC_DIR}/profile.plist"

@@ -219,102 +219,20 @@ def team_from_profiles():
     return None
 
 
-def team_by_issuing_certificate():
-    work = env("ASC_DIR")
-    key_path = os.path.join(work, "lookup.key")
-    csr_path = os.path.join(work, "lookup.csr")
-    created = subprocess.run(
-        [
-            "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", key_path, "-out", csr_path,
-            "-subj", "/CN=Vela CI team lookup",
-        ],
-        capture_output=True,
-        check=False,
-    )
-    try:
-        os.remove(key_path)
-    except OSError:
-        pass
-    if created.returncode != 0:
-        print("Could not build a certificate request to discover the Team ID.")
-        return None
-    with open(csr_path, "r", encoding="ascii") as handle:
-        csr = handle.read()
-    status, payload = api("POST", "/v1/certificates", {
-        "data": {
-            "type": "certificates",
-            "attributes": {"certificateType": "DISTRIBUTION", "csrContent": csr},
-        }
-    })
-    if status >= 400:
-        print("No distribution certificate could be created to discover the Team ID.")
-        print(error_text(json.dumps(payload).encode()))
-        return None
-    issued = payload.get("data") or {}
-    attributes = issued.get("attributes") or {}
-    team = team_in_text(attributes.get("name") or "")
-    if not team and attributes.get("certificateContent"):
-        team = team_from_certificate(attributes["certificateContent"])
-    cert_id = issued.get("id")
-    if cert_id:
-        removed, _ = api("DELETE", "/v1/certificates/" + urllib.parse.quote(cert_id))
-        if removed in (200, 202, 204):
-            print("Removed the temporary distribution certificate used only to read the Team ID.")
-        else:
-            print("Could not remove the temporary distribution certificate.")
-    return team
-
-
 def resolve_team():
+    """Read a team id if one is already visible. Never creates or revokes a certificate."""
     supplied = env("DEVELOPMENT_TEAM").strip()
     if supplied:
         if not re.fullmatch(r"[A-Z0-9]{10}", supplied):
             fail("DEVELOPMENT_TEAM is set but is not a 10-character Team ID.")
         print("Using Team ID from DEVELOPMENT_TEAM.")
         return supplied
-    for finder in (team_from_certificates, team_from_profiles, team_by_issuing_certificate):
+    for finder in (team_from_certificates, team_from_profiles):
         team = finder()
         if team:
             print(f"Team ID: {team}")
             return team
-    fail(
-        "Die Team-ID (10 Zeichen) konnte aus dem App-Store-Connect-Schlüssel nicht ermittelt werden.\n"
-        "Automatisches Signieren braucht sie. Bitte das Repository-Secret DEVELOPMENT_TEAM setzen\n"
-        "(App Store Connect → Benutzer und Zugriffsrechte, Mitgliedschaft, oder\n"
-        "developer.apple.com/account → Membership Details).\n"
-        "Es wurde kein Zertifikat und kein Profil gefunden, aus dem die Team-ID abgelesen werden kann."
-    )
-
-
-def revoke_unreferenced_distribution_certs():
-    """Drop distribution certs no profile uses. CI has no private key for them, and a keyless cert blocks cloud signing."""
-    status, payload = api("GET", "/v1/profiles?include=certificates&limit=50")
-    if status >= 400:
-        print("Skipping certificate cleanup because profiles could not be listed.")
-        return
-    used = set()
-    for item in payload.get("data") or []:
-        related = ((item.get("relationships") or {}).get("certificates") or {}).get("data") or []
-        for cert in related:
-            if cert.get("id"):
-                used.add(cert["id"])
-    for item in payload.get("included") or []:
-        if item.get("type") == "certificates" and item.get("id"):
-            used.add(item["id"])
-    status, payload = api("GET", "/v1/certificates?limit=200")
-    if status >= 400:
-        return
-    for item in payload.get("data") or []:
-        kind = ((item.get("attributes") or {}).get("certificateType") or "").upper()
-        if "DISTRIBUTION" not in kind:
-            continue
-        cert_id = item.get("id")
-        if not cert_id or cert_id in used:
-            continue
-        removed, _ = api("DELETE", "/v1/certificates/" + urllib.parse.quote(cert_id))
-        if removed in (200, 202, 204):
-            print("Revoked an unused distribution certificate so cloud signing can create one that has a private key.")
+    return ""
 
 
 def ensure_ci_device():
@@ -387,97 +305,282 @@ def ensure_bundle_id(team):
     return None
 
 
-def delete_ci_profiles():
-    status, payload = api("GET", "/v1/profiles?limit=100")
+def distribution_certificates():
+    status, payload = api("GET", "/v1/certificates?limit=200")
     if status >= 400:
-        return
+        print("Certificates could not be listed.")
+        print(error_text(json.dumps(payload).encode()))
+        return []
+    found = []
     for item in payload.get("data") or []:
-        if (item.get("attributes") or {}).get("name") != "Vela App Store":
-            continue
-        removed, _ = api("DELETE", "/v1/profiles/" + urllib.parse.quote(item["id"]))
-        if removed in (200, 202, 204):
-            print("Removed the previous CI App Store profile.")
+        kind = ((item.get("attributes") or {}).get("certificateType") or "").upper()
+        if "DISTRIBUTION" in kind:
+            found.append(item)
+    return found
 
 
-def issue_app_store_signing(team):
-    """An App Store profile does not need a registered device. Automatic signing does, and this team has none Xcode accepts."""
-    bundle = ensure_bundle_id(team)
-    if not bundle:
-        fail(f"Bundle ID {BUNDLE_ID} is not registered, so no App Store profile can be created.")
+def certificate_serial(pem):
+    inspected = subprocess.run(
+        ["openssl", "x509", "-noout", "-serial"],
+        input=pem if isinstance(pem, bytes) else pem.encode(),
+        capture_output=True,
+        check=False,
+    )
+    if inspected.returncode != 0:
+        return ""
+    text = inspected.stdout.decode("utf-8", errors="replace").strip()
+    if "=" in text:
+        text = text.split("=", 1)[1]
+    return text.upper().lstrip("0")
+
+
+def remember_signing_secret(name, path):
+    """Store a secret for the next run. The file contents are never printed."""
+    repo = os.environ.get("GITHUB_REPOSITORY") or "DarphV/vela"
+    with open(path, "rb") as handle:
+        stored = subprocess.run(
+            ["gh", "secret", "set", name, "--repo", repo],
+            stdin=handle,
+            capture_output=True,
+            check=False,
+        )
+    if stored.returncode != 0:
+        detail = stored.stderr.decode("utf-8", errors="replace")
+        detail = re.sub(r"[A-Za-z0-9+/=]{24,}", "***", detail)
+        print(f"Could not save {name} for later runs ({detail.strip()[:240]}).")
+        return False
+    print(f"Saved {name} for later runs. The value was not printed.")
+    return True
+
+
+def write_p12(key_path, cert_pem, password):
     work = env("ASC_DIR")
-    key_path = os.path.join(work, "dist.key")
-    csr_path = os.path.join(work, "dist.csr")
-    created = subprocess.run(
+    cert_path = os.path.join(work, "cert.pem")
+    p12_path = os.path.join(work, "dist.p12")
+    pass_path = os.path.join(work, "p12.pass")
+    with open(cert_path, "wb") as handle:
+        handle.write(cert_pem if isinstance(cert_pem, bytes) else cert_pem.encode())
+    with open(pass_path, "w", encoding="utf-8") as handle:
+        handle.write(password)
+    os.chmod(pass_path, 0o600)
+    exported = subprocess.run(
         [
-            "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", key_path, "-out", csr_path,
-            "-subj", "/CN=Vela CI Distribution",
+            "openssl", "pkcs12", "-export", "-legacy",
+            "-inkey", key_path, "-in", cert_path, "-out", p12_path,
+            "-passout", "file:" + pass_path,
         ],
         capture_output=True,
         check=False,
     )
-    if created.returncode != 0:
-        fail("Could not create a certificate request for App Store signing.")
-    os.chmod(key_path, 0o600)
-    with open(csr_path, "r", encoding="ascii") as handle:
-        csr = handle.read()
-    status, payload = api("POST", "/v1/certificates", {
-        "data": {
-            "type": "certificates",
-            "attributes": {"certificateType": "DISTRIBUTION", "csrContent": csr},
-        }
-    })
-    if status >= 400:
-        print(error_text(json.dumps(payload).encode()))
-        fail(
-            "Could not create an Apple Distribution certificate.\n"
-            "OWNER ACTION: If the account already has the maximum number of distribution certificates,\n"
-            "revoke an unused one under Certificates, Identifiers & Profiles and re-run."
+    if exported.returncode != 0:
+        exported = subprocess.run(
+            [
+                "openssl", "pkcs12", "-export",
+                "-inkey", key_path, "-in", cert_path, "-out", p12_path,
+                "-passout", "file:" + pass_path,
+            ],
+            capture_output=True,
+            check=False,
         )
-    issued = payload.get("data") or {}
-    cert_id = issued.get("id")
-    content = (issued.get("attributes") or {}).get("certificateContent")
-    if not cert_id or not content:
-        fail("App Store Connect did not return the new distribution certificate.")
-    der = base64.b64decode(content)
-    with open(os.path.join(work, "cert.der"), "wb") as handle:
-        handle.write(der)
+    if exported.returncode != 0:
+        fail("Could not build the distribution PKCS#12 file.")
+    os.chmod(p12_path, 0o600)
+    b64_path = os.path.join(work, "dist.p12.b64")
+    with open(p12_path, "rb") as src, open(b64_path, "wb") as dst:
+        dst.write(base64.b64encode(src.read()))
+    os.chmod(b64_path, 0o600)
+    saved = remember_signing_secret("VELA_DIST_P12_BASE64", b64_path) and remember_signing_secret("VELA_DIST_P12_PASSWORD", pass_path)
+    try:
+        os.remove(b64_path)
+    except OSError:
+        pass
+    if saved:
+        print("The distribution certificate will be reused on the next run.")
+    else:
+        print("This run can still sign. The workflow token could not store the private key, so a later run cannot reuse this certificate.")
+    return saved
+
+
+def reuse_saved_p12():
+    encoded = env("VELA_DIST_P12_BASE64").strip()
+    password = env("VELA_DIST_P12_PASSWORD")
+    if not encoded or not password:
+        return None
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception:
+        fail("The saved distribution certificate could not be read. Nothing was revoked or replaced.")
+    work = env("ASC_DIR")
+    p12_path = os.path.join(work, "dist.p12")
+    pass_path = os.path.join(work, "p12.pass")
+    with open(p12_path, "wb") as handle:
+        handle.write(raw)
+    with open(pass_path, "w", encoding="utf-8") as handle:
+        handle.write(password)
+    os.chmod(p12_path, 0o600)
+    os.chmod(pass_path, 0o600)
     pem = subprocess.run(
-        ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
-        input=der,
+        ["openssl", "pkcs12", "-in", p12_path, "-nokeys", "-passin", "file:" + pass_path, "-legacy"],
         capture_output=True,
         check=False,
     )
     if pem.returncode != 0:
-        fail("Could not read the distribution certificate.")
+        pem = subprocess.run(
+            ["openssl", "pkcs12", "-in", p12_path, "-nokeys", "-passin", "file:" + pass_path],
+            capture_output=True,
+            check=False,
+        )
+    if pem.returncode != 0 or b"BEGIN CERTIFICATE" not in pem.stdout:
+        fail("The saved distribution certificate could not be unlocked. Nothing was revoked or replaced.")
     with open(os.path.join(work, "cert.pem"), "wb") as handle:
         handle.write(pem.stdout)
-    learned = team_in_text((issued.get("attributes") or {}).get("name") or "") or team_from_certificate(content)
-    if learned:
-        team = learned
-    status, payload = api("POST", "/v1/profiles", {
-        "data": {
-            "type": "profiles",
-            "attributes": {"name": "Vela App Store", "profileType": "IOS_APP_STORE"},
-            "relationships": {
-                "bundleId": {"data": {"type": "bundleIds", "id": bundle}},
-                "certificates": {"data": [{"type": "certificates", "id": cert_id}]},
-            },
-        }
-    })
+    print("Reusing the saved distribution certificate. No certificate will be created or revoked.")
+    return pem.stdout
+
+
+def profile_for_certificate(cert_id, bundle):
+    status, payload = api("GET", "/v1/profiles?filter[profileType]=IOS_APP_STORE&include=bundleId,certificates&limit=100")
     if status >= 400:
-        print(error_text(json.dumps(payload).encode()))
-        fail("Could not create the App Store provisioning profile.")
-    profile_b64 = ((payload.get("data") or {}).get("attributes") or {}).get("profileContent")
-    if not profile_b64:
-        fail("App Store Connect did not return the provisioning profile.")
-    with open(os.path.join(work, "vela.mobileprovision"), "wb") as handle:
-        handle.write(base64.b64decode(profile_b64))
-    print("Created an App Store profile for " + BUNDLE_ID + ". No device is required.")
+        return None
+    included = {item.get("id"): item for item in payload.get("included") or []}
+    for item in payload.get("data") or []:
+        relationships = item.get("relationships") or {}
+        certs = ((relationships.get("certificates") or {}).get("data") or [])
+        if cert_id not in {cert.get("id") for cert in certs}:
+            continue
+        bundle_ref = ((relationships.get("bundleId") or {}).get("data") or {})
+        bundle_item = included.get(bundle_ref.get("id")) or {}
+        identifier = (bundle_item.get("attributes") or {}).get("identifier")
+        if bundle and identifier and identifier != BUNDLE_ID:
+            continue
+        content = (item.get("attributes") or {}).get("profileContent")
+        name = (item.get("attributes") or {}).get("name") or "Vela App Store"
+        if content and name:
+            return name, content
+    return None
+
+
+def install_profile(name, content_b64):
+    with open(os.path.join(env("ASC_DIR"), "vela.mobileprovision"), "wb") as handle:
+        handle.write(base64.b64decode(content_b64))
+    with open(os.path.join(env("ASC_DIR"), "profile_name"), "w", encoding="utf-8") as handle:
+        handle.write(name + "\n")
+    print(f"Using App Store profile {name}.")
+
+
+def create_profile(team, cert_id, preferred_name):
+    bundle = ensure_bundle_id(team)
+    if not bundle:
+        fail(f"Bundle ID {BUNDLE_ID} is not registered, so no App Store profile can be created.")
+    for name in (preferred_name, "Vela App Store CI"):
+        status, payload = api("POST", "/v1/profiles", {
+            "data": {
+                "type": "profiles",
+                "attributes": {"name": name, "profileType": "IOS_APP_STORE"},
+                "relationships": {
+                    "bundleId": {"data": {"type": "bundleIds", "id": bundle}},
+                    "certificates": {"data": [{"type": "certificates", "id": cert_id}]},
+                },
+            }
+        })
+        if status in (200, 201):
+            content = ((payload.get("data") or {}).get("attributes") or {}).get("profileContent")
+            if content:
+                install_profile(name, content)
+                return
+        detail = error_text(json.dumps(payload).encode())
+        if "already" not in detail.lower() and status != 409:
+            print(detail)
+            fail("Could not create the App Store provisioning profile.")
+    fail("Could not create the App Store provisioning profile.")
+
+
+def issue_app_store_signing(team):
+    """Use one distribution certificate forever. This function never deletes or revokes certificates."""
+    reused = reuse_saved_p12()
+    cert_id = None
+    if reused:
+        serial = certificate_serial(reused)
+        for item in distribution_certificates():
+            raw = ((item.get("attributes") or {}).get("serialNumber") or "").upper().lstrip("0")
+            if serial and raw == serial:
+                cert_id = item.get("id")
+                learned = team_in_text((item.get("attributes") or {}).get("name") or "")
+                if not learned and (item.get("attributes") or {}).get("certificateContent"):
+                    learned = team_from_certificate(item["attributes"]["certificateContent"])
+                if learned:
+                    team = learned
+                break
+        if not cert_id:
+            fail(
+                "The saved distribution certificate is not on the Apple account.\n"
+                "This workflow will not revoke anything and will not create a replacement over a saved key."
+            )
+    else:
+        if distribution_certificates():
+            print("Existing distribution certificates stay on the account. Creating one CI certificate and saving its private key.")
+        work = env("ASC_DIR")
+        key_path = os.path.join(work, "dist.key")
+        csr_path = os.path.join(work, "dist.csr")
+        created = subprocess.run(
+            [
+                "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", key_path, "-out", csr_path,
+                "-subj", "/CN=Vela CI Distribution",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if created.returncode != 0:
+            fail("Could not create a certificate request for App Store signing.")
+        os.chmod(key_path, 0o600)
+        with open(csr_path, "r", encoding="ascii") as handle:
+            csr = handle.read()
+        status, payload = api("POST", "/v1/certificates", {
+            "data": {
+                "type": "certificates",
+                "attributes": {"certificateType": "DISTRIBUTION", "csrContent": csr},
+            }
+        })
+        if status >= 400:
+            print(error_text(json.dumps(payload).encode()))
+            fail(
+                "Could not create an Apple Distribution certificate.\n"
+                "Existing certificates were left in place. This workflow does not revoke them."
+            )
+        issued = payload.get("data") or {}
+        cert_id = issued.get("id")
+        content = (issued.get("attributes") or {}).get("certificateContent")
+        if not cert_id or not content:
+            fail("App Store Connect did not return the new distribution certificate.")
+        der = base64.b64decode(content)
+        pem = subprocess.run(
+            ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
+            input=der,
+            capture_output=True,
+            check=False,
+        )
+        if pem.returncode != 0:
+            fail("Could not read the distribution certificate.")
+        learned = team_in_text((issued.get("attributes") or {}).get("name") or "") or team_from_certificate(content)
+        if learned:
+            team = learned
+        password = base64.b64encode(os.urandom(18)).decode("ascii")
+        write_p12(key_path, pem.stdout, password)
+        try:
+            os.remove(key_path)
+        except OSError:
+            pass
+    existing = profile_for_certificate(cert_id, team)
+    if existing:
+        install_profile(existing[0], existing[1])
+        print("Reusing the existing App Store profile. No profile was deleted.")
+    else:
+        create_profile(team, cert_id, "Vela App Store")
     return team
 
 
-def write_export_options(team):
+def write_export_options(team, profile_name):
     path = os.path.join(env("ASC_DIR"), "ExportOptions.plist")
     with open(path, "wb") as handle:
         plistlib.dump({
@@ -486,14 +589,14 @@ def write_export_options(team):
             "signingStyle": "manual",
             "signingCertificate": "Apple Distribution",
             "teamID": team,
-            "provisioningProfiles": {BUNDLE_ID: "Vela App Store"},
+            "provisioningProfiles": {BUNDLE_ID: profile_name},
             "uploadSymbols": True,
             "manageAppVersionAndBuildNumber": False,
         }, handle, fmt=plistlib.FMT_XML)
-    print("ExportOptions: method app-store-connect, destination upload, signingStyle manual, App Store profile.")
+    print("ExportOptions: method app-store-connect, destination upload, signingStyle manual.")
 
 
-def patch_app_signing(team):
+def patch_app_signing(team, profile_name):
     """Put the App Store profile on the app target only. A command-line specifier also hits Swift packages, which cannot use it."""
     path = "Vela.xcodeproj/project.pbxproj"
     with open(path, "r", encoding="utf-8") as handle:
@@ -508,7 +611,7 @@ def patch_app_signing(team):
             piece, _ = re.subn(r'CODE_SIGN_IDENTITY = [^;]+;', 'CODE_SIGN_IDENTITY = "Apple Distribution";', piece)
             piece, _ = re.subn(
                 r'PROVISIONING_PROFILE_SPECIFIER = [^;]+;',
-                'PROVISIONING_PROFILE_SPECIFIER = "Vela App Store";',
+                f'PROVISIONING_PROFILE_SPECIFIER = "{profile_name}";',
                 piece,
             )
             extra = []
@@ -518,8 +621,9 @@ def patch_app_signing(team):
                 extra.append(f"DEVELOPMENT_TEAM = {team};")
             if 'CODE_SIGN_IDENTITY = "Apple Distribution";' not in piece:
                 extra.append('CODE_SIGN_IDENTITY = "Apple Distribution";')
-            if 'PROVISIONING_PROFILE_SPECIFIER = "Vela App Store";' not in piece:
-                extra.append('PROVISIONING_PROFILE_SPECIFIER = "Vela App Store";')
+            quoted = f'PROVISIONING_PROFILE_SPECIFIER = "{profile_name}";'
+            if quoted not in piece:
+                extra.append(quoted)
             if extra:
                 piece = piece.replace(
                     "PRODUCT_BUNDLE_IDENTIFIER = de.barczewski.vela;",
@@ -538,13 +642,14 @@ def patch_app_signing(team):
 def prepare():
     write_key()
     team = resolve_team()
-    delete_ci_profiles()
-    revoke_unreferenced_distribution_certs()
     team = issue_app_store_signing(team)
+    if not re.fullmatch(r"[A-Z0-9]{10}", team or ""):
+        fail("The Team ID is still unknown. No certificate was created or revoked while looking for it.")
     with open(os.path.join(env("ASC_DIR"), "team_id"), "w", encoding="ascii") as handle:
         handle.write(team + "\n")
-    patch_app_signing(team)
-    write_export_options(team)
+    profile_name = open(os.path.join(env("ASC_DIR"), "profile_name"), encoding="utf-8").read().strip()
+    patch_app_signing(team, profile_name)
+    write_export_options(team, profile_name)
     print("No app extensions. App Intents use " + BUNDLE_ID + ".")
 
 
@@ -605,7 +710,13 @@ def scrub(path):
         return
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         text = handle.read()
-    secrets = [env("ASC_PRIVATE_KEY"), env("ASC_KEY_ID"), env("ASC_ISSUER_ID")]
+    secrets = [
+        env("ASC_PRIVATE_KEY"),
+        env("ASC_KEY_ID"),
+        env("ASC_ISSUER_ID"),
+        env("VELA_DIST_P12_BASE64"),
+        env("VELA_DIST_P12_PASSWORD"),
+    ]
     for secret in secrets:
         if not secret:
             continue
