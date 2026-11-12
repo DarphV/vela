@@ -20,7 +20,7 @@ enum Embedder {
     }
 
     private static func contextualVector(_ text: String) -> [Float]? {
-        let embedding = NLContextualEmbedding(language: .german)
+        guard let embedding = NLContextualEmbedding(language: .german) else { return nil }
         guard embedding.hasAvailableAssets else { return nil }
         do {
             try embedding.load()

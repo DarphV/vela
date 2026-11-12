@@ -89,7 +89,7 @@ private enum AppleStream {
         var latest = ""
         for try await partial in stream {
             latest = partial.content
-            onUpdate(latest)
+            await onUpdate(latest)
         }
         return latest
     }

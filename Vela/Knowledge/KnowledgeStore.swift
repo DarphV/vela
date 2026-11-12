@@ -20,6 +20,12 @@ struct MemoryFact: Identifiable, Hashable {
     let text: String
 }
 
+struct KnowledgePassage: Hashable {
+    let source: VelaSource
+    let text: String
+    let score: Float
+}
+
 @MainActor
 protocol KnowledgeStore: AnyObject {
     var documents: [KnowledgeDocument] { get }

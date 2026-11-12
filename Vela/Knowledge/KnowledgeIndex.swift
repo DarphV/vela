@@ -214,7 +214,7 @@ final class KnowledgeIndex {
             sqlite3_bind_null(statement, index)
             return
         }
-        values.withUnsafeBytes { raw in
+        _ = values.withUnsafeBytes { raw in
             sqlite3_bind_blob(statement, index, raw.baseAddress, Int32(raw.count), transient)
         }
     }
