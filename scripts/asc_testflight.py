@@ -966,46 +966,86 @@ def fetch_crash_log(submission):
             print(redact_emails(error_text(body)[:400]))
 
 
+def relationship_names(resource):
+    relationships = resource.get("relationships") or {}
+    names = sorted(relationships.keys())
+    print("relationships: " + ", ".join(names))
+    return relationships
+
+
+def follow_related(label, relationship):
+    related = ((relationship or {}).get("links") or {}).get("related")
+    if not related:
+        return []
+    path = related
+    if path.startswith(API):
+        path = path[len(API):]
+    status, payload = api("GET", path + ("&limit=20" if "?" in path else "?limit=20"))
+    count = len(payload.get("data") or []) if isinstance(payload.get("data"), list) else (1 if payload.get("data") else 0)
+    print(f"{label} HTTP {status} count {count}")
+    if status >= 400:
+        print(error_text(json.dumps(payload).encode())[:400])
+        return []
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return [data]
+    return data or []
+
+
 def crash_reports():
     """Read TestFlight crash feedback for build 19. Does not create or revoke certificates."""
     write_key()
     app = app_id()
     print(f"App {BUNDLE_ID} found.")
+    status, app_payload = api("GET", f"/v1/apps/{app}")
+    if status < 400 and app_payload.get("data"):
+        relationship_names(app_payload["data"])
     builds = builds_for_version(app, "19")
     print(f"Build records with version 19: {len(builds)}")
-    build_ids = [item.get("id") for item in builds if item.get("id")]
     submissions = []
-    queries = []
-    for build_id in build_ids:
-        queries.append(f"/v1/betaFeedbackCrashSubmissions?filter[build]={build_id}&limit=20&sort=-createdDate")
-        queries.append(f"/v1/builds/{build_id}/betaFeedbackCrashSubmissions?limit=20")
-    queries.append("/v1/betaFeedbackCrashSubmissions?limit=20&sort=-createdDate")
-    for path in queries:
-        status, payload = api("GET", path)
-        count = len(payload.get("data") or []) if status < 400 else 0
-        print(f"{path.split('?')[0]} HTTP {status} count {count}")
-        if status >= 400:
-            print(error_text(json.dumps(payload).encode())[:400])
-            continue
-        for item in payload.get("data") or []:
-            if item.get("id") and item.get("id") not in {row.get("id") for row in submissions}:
-                submissions.append(item)
-        if submissions and "filter[build]" in path:
-            break
+    for build in builds:
+        build_id = build.get("id")
+        print(f"Build {build_id} uploaded {((build.get('attributes') or {}).get('uploadedDate'))}")
+        status, full = api("GET", f"/v1/builds/{build_id}")
+        resource = full.get("data") if status < 400 else build
+        relationships = relationship_names(resource or {})
+        for name, relationship in relationships.items():
+            low = name.lower()
+            if any(word in low for word in ("crash", "feedback", "diagnostic", "log", "beta")):
+                found = follow_related(name, relationship)
+                for item in found:
+                    if item.get("type", "").lower().find("crash") >= 0 or "comment" in (item.get("attributes") or {}) or "deviceModel" in (item.get("attributes") or {}):
+                        submissions.append(item)
+                    else:
+                        print(f"  related {item.get('type')} {item.get('id')}")
+    # Individual crash submissions cannot be listed. Probe the build id as an instance id too.
+    for build in builds:
+        build_id = build.get("id")
+        for path in (
+            f"/v1/betaFeedbackCrashSubmissions/{build_id}",
+            f"/v1/betaFeedbackCrashSubmissions/{build_id}/crashLog",
+        ):
+            status, body, _ = api_bytes(path)
+            print(f"{path} HTTP {status} ({len(body)} bytes)")
+            if status < 400 and body:
+                save_crash_body(build_id, status, body, "")
+                return
+            if body:
+                print(redact_emails(error_text(body)[:300]))
     if not submissions:
-        print("No TestFlight crash submissions were returned.")
+        print("No TestFlight crash submissions were linked from the build.")
         return
-    print(f"Crash submissions: {len(submissions)}")
+    print(f"Crash-like records: {len(submissions)}")
     for item in submissions:
         attrs = item.get("attributes") or {}
         comment = redact_emails(str(attrs.get("comment") or ""))
         print("--- submission ---")
-        print(f"id: {item.get('id')}")
+        print(f"type: {item.get('type')} id: {item.get('id')}")
         print(f"created: {attrs.get('createdDate')}")
         print(f"device: {attrs.get('deviceModel')} {attrs.get('osVersion')}")
-        print(f"uptime ms: {attrs.get('appUptimeInMilliseconds')}")
         if comment:
             print(f"comment: {comment[:500]}")
+        relationship_names(item)
         fetch_crash_log(item)
 
 
