@@ -12,6 +12,7 @@ import plistlib
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -775,6 +776,9 @@ def owner_app_record():
 
 
 def poll(version=None):
+    if not env("KEY_PATH"):
+        os.environ["KEY_PATH"] = os.path.join(tempfile.gettempdir(), "vela-authkey.p8")
+    write_key()
     query = urllib.parse.urlencode({"filter[bundleId]": BUNDLE_ID, "limit": "5"})
     status, payload = api("GET", "/v1/apps?" + query)
     if status >= 400:
