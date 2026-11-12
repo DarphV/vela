@@ -781,7 +781,7 @@ def watch_upload(version):
         print(f"Could not look up the app record (HTTP {status}).")
         return 1
     app_id = payload["data"][0]["id"]
-    deadline = time.time() + 40 * 60
+    deadline = time.time() + 90 * 60
     while time.time() < deadline:
         upload_status, upload_payload = api("GET", f"/v1/apps/{app_id}/buildUploads?limit=10")
         if upload_status >= 400:
