@@ -4,10 +4,46 @@ name: Create signing cert
 
 on:
   workflow_dispatch:
+    inputs:
+      task:
+        description: certificate creates a signing cert; crash-logs only reads TestFlight crashes
+        required: true
+        default: certificate
+        type: choice
+        options:
+          - certificate
+          - crash-logs
 
 jobs:
+  crash-logs:
+    name: crash-logs
+    if: github.event.inputs.task == 'crash-logs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: TestFlight-Absturzberichte lesen
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: bash scripts/fetch-crash.sh
+
+      - name: Crash-Logs hochladen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testflight-crash-logs
+          path: |
+            crash-logs/
+            crash-fetch.log
+          if-no-files-found: ignore
+          retention-days: 5
+
   create-signing-cert:
     name: create-signing-cert
+    if: github.event.inputs.task != 'crash-logs'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

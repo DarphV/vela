@@ -838,12 +838,185 @@ def scrub(path):
         handle.write(text)
 
 
+def redact_emails(text):
+    return re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[email]", text)
+
+
+def api_bytes(path):
+    url = path if path.startswith("http") else API + path
+    request = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "Authorization": "Bearer " + jwt_token(),
+            "Accept": "*/*",
+            "User-Agent": "Vela-CI",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            return response.status, response.read(), response.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as error:
+        return error.code, error.read(), ""
+
+
+def app_id():
+    query = urllib.parse.urlencode({"filter[bundleId]": BUNDLE_ID, "limit": "5"})
+    status, payload = api("GET", "/v1/apps?" + query)
+    if status >= 400:
+        fail("Could not look up the app. " + error_text(json.dumps(payload).encode()))
+    for item in payload.get("data") or []:
+        if (item.get("attributes") or {}).get("bundleId") == BUNDLE_ID:
+            return item["id"]
+    fail(f"No App Store Connect app for {BUNDLE_ID}.")
+
+
+def builds_for_version(app, version):
+    query = urllib.parse.urlencode({
+        "filter[app]": app,
+        "filter[version]": version,
+        "limit": "10",
+    })
+    status, payload = api("GET", "/v1/builds?" + query)
+    if status >= 400:
+        print(f"Build lookup HTTP {status}: {error_text(json.dumps(payload).encode())[:400]}")
+        return []
+    return payload.get("data") or []
+
+
+def interesting_crash_lines(text):
+    keep = []
+    needles = (
+        "exception type", "exception subtype", "termination reason", "termination ",
+        "triggered by thread", "application specific", "jetsam", "mlx", "metal",
+        "vela", "swift", "abort", "fatal error", "sigkill", "sigabrt", "exc_bad",
+        "exc_resource", "memory", "last exception backtrace",
+    )
+    for line in text.splitlines():
+        low = line.lower()
+        if any(needle in low for needle in needles):
+            keep.append(line.rstrip()[:240])
+        if len(keep) >= 80:
+            break
+    return keep
+
+
+def save_crash_body(submission_id, status, body, content_type):
+    out_dir = env("CRASH_DIR") or "."
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"crash-{submission_id}.txt")
+    text = ""
+    if body[:1] in (b"{", b"["):
+        try:
+            payload = json.loads(body.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            data = payload.get("data") or {}
+            attributes = data.get("attributes") if isinstance(data, dict) else None
+            if isinstance(attributes, dict):
+                for key, value in attributes.items():
+                    if isinstance(value, str) and len(value) > 40:
+                        text = value
+                        break
+            if not text:
+                text = json.dumps(payload)[:2000]
+                print(f"Crash log JSON keys: {list(payload.keys())}")
+                if isinstance(data, dict):
+                    print(f"data keys: {list(data.keys())}")
+                    if isinstance(data.get("attributes"), dict):
+                        print(f"attribute keys: {list(data['attributes'].keys())}")
+        else:
+            text = body.decode("utf-8", errors="replace")
+    else:
+        text = body.decode("utf-8", errors="replace")
+    text = redact_emails(text)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    print(f"Saved crash log ({status}, {content_type or 'unknown'}, {len(text)} chars)")
+    highlights = interesting_crash_lines(text)
+    if highlights:
+        print("--- crash excerpt ---")
+        print("\n".join(highlights))
+    else:
+        print(text[:1500])
+    return path
+
+
+def fetch_crash_log(submission):
+    submission_id = submission.get("id") or "unknown"
+    relationship = ((submission.get("relationships") or {}).get("crashLog") or {})
+    related = ((relationship.get("links") or {}).get("related")) or ""
+    candidates = []
+    if related:
+        candidates.append(related)
+    candidates.append(f"/v1/betaFeedbackCrashSubmissions/{submission_id}/crashLog")
+    candidates.append(f"/v1/betaFeedbackCrashSubmissions/{submission_id}/crashLogs")
+    seen = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        status, body, content_type = api_bytes(path)
+        print(f"GET crash log {submission_id}: HTTP {status} ({len(body)} bytes)")
+        if status < 400 and body:
+            save_crash_body(submission_id, status, body, content_type)
+            return
+        if body and status >= 400:
+            print(redact_emails(error_text(body)[:400]))
+
+
+def crash_reports():
+    """Read TestFlight crash feedback for build 19. Does not create or revoke certificates."""
+    write_key()
+    app = app_id()
+    print(f"App {BUNDLE_ID} found.")
+    builds = builds_for_version(app, "19")
+    print(f"Build records with version 19: {len(builds)}")
+    build_ids = [item.get("id") for item in builds if item.get("id")]
+    submissions = []
+    queries = []
+    for build_id in build_ids:
+        queries.append(f"/v1/betaFeedbackCrashSubmissions?filter[build]={build_id}&limit=20&sort=-createdDate")
+        queries.append(f"/v1/builds/{build_id}/betaFeedbackCrashSubmissions?limit=20")
+    queries.append("/v1/betaFeedbackCrashSubmissions?limit=20&sort=-createdDate")
+    for path in queries:
+        status, payload = api("GET", path)
+        count = len(payload.get("data") or []) if status < 400 else 0
+        print(f"{path.split('?')[0]} HTTP {status} count {count}")
+        if status >= 400:
+            print(error_text(json.dumps(payload).encode())[:400])
+            continue
+        for item in payload.get("data") or []:
+            if item.get("id") and item.get("id") not in {row.get("id") for row in submissions}:
+                submissions.append(item)
+        if submissions and "filter[build]" in path:
+            break
+    if not submissions:
+        print("No TestFlight crash submissions were returned.")
+        return
+    print(f"Crash submissions: {len(submissions)}")
+    for item in submissions:
+        attrs = item.get("attributes") or {}
+        comment = redact_emails(str(attrs.get("comment") or ""))
+        print("--- submission ---")
+        print(f"id: {item.get('id')}")
+        print(f"created: {attrs.get('createdDate')}")
+        print(f"device: {attrs.get('deviceModel')} {attrs.get('osVersion')}")
+        print(f"uptime ms: {attrs.get('appUptimeInMilliseconds')}")
+        if comment:
+            print(f"comment: {comment[:500]}")
+        fetch_crash_log(item)
+
+
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "prepare":
         prepare()
     elif command == "create-cert":
         create_signing_cert()
+    elif command == "crash-logs":
+        crash_reports()
     elif command == "poll":
         raise SystemExit(poll())
     elif command == "scrub" and len(sys.argv) == 3:
