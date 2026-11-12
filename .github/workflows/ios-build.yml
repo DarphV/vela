@@ -1,0 +1,90 @@
+# Baut Vela in der Cloud auf einem GitHub-Mac (kein eigener Mac nötig) und
+# liefert eine UNSIGNIERTE .ipa als Artefakt. Signiert wird beim Installieren
+# mit Sideloadly + kostenloser Apple-ID (siehe README).
+name: iOS Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Vela (unsigned .ipa)
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode wählen (neuestes 26.x, sonst 16.x)
+        run: |
+          set -euo pipefail
+          ls -d /Applications/Xcode*.app || true
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "${XC}" ]; then
+            XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          fi
+          if [ -z "${XC}" ]; then XC=/Applications/Xcode.app; fi
+          echo "Using ${XC}"
+          sudo xcode-select -s "${XC}/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: XcodeGen installieren
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Xcode-Projekt erzeugen
+        run: xcodegen generate
+
+      - name: Bauen (Release, iphoneos, ohne Signatur)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Vela.xcodeproj \
+            -scheme Vela \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build 2>&1 | tee build.log | (xcbeautify 2>/dev/null || cat)
+
+      - name: .ipa packen
+        run: |
+          set -euo pipefail
+          APP=build/Build/Products/Release-iphoneos/Vela.app
+          test -d "$APP"
+          ls -la "$APP"
+          test -f "$APP/default.metallib" && echo "Metal-Bibliothek gefunden" || echo "WARNUNG: default.metallib fehlt"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Vela-unsigned.ipa Payload
+          ls -la Vela-unsigned.ipa
+
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vela-unsigned-ipa
+          path: Vela-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build-Log bei Fehler hochladen
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore

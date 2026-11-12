@@ -1,1 +1,83 @@
-# vela
+# Vela – iPhone-App (Gerüst 0.1)
+
+Vela ist deine eigene kleine KI fürs iPhone: startet direkt im **Sprachmodus**, wechselt
+beim Antippen in den **Glas-Chat**, zeigt zu jeder Antwort die **Quelle** und lässt sich mit
+**„Hey Siri, starte Vela“** öffnen. Design 1:1 aus dem Web-Prototyp übernommen.
+
+> Stand: Gerüst. Die Antworten kommen noch aus einem **Demo-Gehirn** (feste Beispielantworten,
+> markiert mit „Demo-Antwort“). Lokale KI und Dokument-Import folgen im nächsten Schritt.
+
+## Was schon drin ist
+
+| Bereich | Status |
+|---|---|
+| 3 Live-Visuals als Metal-Shader (Nebula, Schwarzes Loch klassisch, Schwarzes Loch Nebula) | ✅ reagieren auf Zuhören / Denken / Sprechen und auf die Lautstärke |
+| Sprachmodus beim Start, Tippen → Glas-Chat, Mikrofon-Knopf → zurück | ✅ |
+| Glas-Chat mit Glas-Blasen, Quellen-Chips, Quellen-Ansicht mit markierten Stellen | ✅ (iOS 26: echtes Liquid Glass, iOS 18: Milchglas) |
+| Spracherkennung Deutsch (wenn möglich offline auf dem iPhone) | ✅ |
+| Sprachausgabe mit der besten deutschen Apple-Stimme, auch über AirPlay/Bluetooth | ✅ |
+| Einstellungen: Design, Stimme, Vorlesen, Websuche (Platzhalter) | ✅ werden gespeichert |
+| Siri: „Starte Vela“, „Frag Vela“ (auch vom HomePod über Persönliche Anfragen) | ✅ |
+| Lokale KI (MLX / llama.cpp / Apple Foundation Models) | ⏳ Platzhalter `LocalLLMBrain` |
+| Handbücher & Standards importieren und durchsuchen (RAG) | ⏳ Platzhalter `KnowledgeStore` |
+| Offline-KI-Stimme / Online-Premium-Stimme | ⏳ in den Einstellungen als „folgt“ |
+
+## Aufbau
+
+```
+vela-ios/
+├─ project.yml                  XcodeGen-Projektbeschreibung (daraus entsteht Vela.xcodeproj)
+├─ Support/Info.plist           wird von XcodeGen erzeugt (deutsche Texte für Mikrofon/Sprache)
+├─ .github/workflows/ios-build.yml   Cloud-Build auf einem GitHub-Mac → unsignierte .ipa
+└─ Vela/
+   ├─ App/VelaApp.swift         Einstieg
+   ├─ Model/                    AppModel (Ablauf Sprachmodus ⇄ Chat), Nachrichten, Einstellungen
+   ├─ Brain/                    VelaBrain-Schnittstelle, DemoBrain, LocalLLMBrain (TODO)
+   ├─ Knowledge/                KnowledgeStore-Schnittstelle für Dokumente (TODO RAG)
+   ├─ Speech/                   Spracherkennung, Sprachausgabe, Audio-Sitzung (AirPlay/Bluetooth)
+   ├─ Visuals/                  Metal-Shader + Renderer + Animations-Logik
+   ├─ Views/                    Sprachmodus, Glas-Chat, Quellen-Ansicht, Einstellungen, Splash
+   ├─ Intents/                  Siri / Kurzbefehle
+   └─ Resources/Assets.xcassets App-Icon, Farben
+```
+
+## Bauen ohne Mac (GitHub Actions)
+
+1. Den Ordner als Repository zu GitHub hochladen (z. B. `DarphV/Vela`).
+2. Bei jedem Push startet automatisch **Actions › iOS Build** (oder per Hand: *Run workflow*).
+   Der Workflow installiert XcodeGen, erzeugt das Projekt und baut mit `xcodebuild`
+   **ohne Signatur**.
+3. Nach ca. 5–10 Minuten unter dem Lauf bei **Artifacts** `Vela-unsigned-ipa` herunterladen und
+   entpacken → `Vela-unsigned.ipa`.
+
+## Auf das iPhone bringen (Sideloadly, kostenlose Apple-ID)
+
+1. Sideloadly auf dem Windows-PC installieren (sideloadly.io), dazu iTunes und iCloud
+   **von der Apple-Website** (nicht aus dem Microsoft Store).
+2. iPhone per Kabel anschließen, „Diesem Computer vertrauen“ bestätigen.
+3. `Vela-unsigned.ipa` in Sideloadly ziehen, eigene Apple-ID eintragen, **Start**.
+   Sideloadly signiert die App dabei mit deiner Apple-ID.
+4. Auf dem iPhone: *Einstellungen › Allgemein › VPN & Geräteverwaltung* → deiner Apple-ID
+   vertrauen. Ab iOS 16 zusätzlich *Einstellungen › Datenschutz & Sicherheit ›
+   Entwicklermodus* einschalten (iPhone startet neu).
+5. Vela öffnen, Mikrofon und Spracherkennung erlauben.
+
+Hinweise zur kostenlosen Apple-ID: Die App läuft **7 Tage**, danach in Sideloadly erneut
+installieren (Daten bleiben erhalten). Mit dem Apple-Developer-Programm (99 €/Jahr) geht das
+über TestFlight ohne Ablauf.
+
+## Tipps
+
+- **Schönere Stimme:** *iOS-Einstellungen › Bedienungshilfen › Gesprochene Inhalte › Stimmen ›
+  Deutsch* → z. B. „Anna (Premium)“ laden, dann in Vela unter *Einstellungen › Stimme* wählen.
+- **Siri:** Vela einmal öffnen, danach funktioniert „Hey Siri, starte Vela“ bzw. „Hey Siri,
+  frag Vela“. Für den HomePod in der Home-App *Persönliche Anfragen* einschalten.
+- **Ton über HomePod/Lautsprecher:** im Kontrollzentrum per AirPlay auswählen – Vela spricht
+  dann dort, das iPhone-Mikrofon hört weiter zu.
+
+## Nächste Schritte
+
+1. Lokale KI einbauen (`Brain/VelaBrain.swift`, `LocalLLMBrain`).
+2. Dokument-Import + Suche mit Quellenangabe (`Knowledge/KnowledgeStore.swift`).
+3. Gedächtnis („lernt dich kennen“), natürliche Offline-Stimme.
+4. Vor einer App-Store-Veröffentlichung: Markenrecht für den Namen „Vela“ prüfen.

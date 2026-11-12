@@ -1,0 +1,55 @@
+# XcodeGen project for Vela – generate with:  xcodegen generate
+name: Vela
+options:
+  bundleIdPrefix: de.barczewski
+  developmentLanguage: de
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_STRICT_CONCURRENCY: minimal
+targets:
+  Vela:
+    type: application
+    platform: iOS
+    sources:
+      - path: Vela
+    settings:
+      base:
+        PRODUCT_NAME: Vela
+        PRODUCT_BUNDLE_IDENTIFIER: de.barczewski.vela
+        INFOPLIST_FILE: Support/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        MTL_FAST_MATH: YES
+        ENABLE_PREVIEWS: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: Vela
+        CFBundleDevelopmentRegion: de
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        NSMicrophoneUsageDescription: "Vela hört dir zu, wenn du im Sprachmodus mit ihr sprichst. Die Sprache wird nur zur Erkennung deiner Frage verwendet und nicht gespeichert."
+        NSSpeechRecognitionUsageDescription: "Vela wandelt deine gesprochenen Fragen in Text um – wenn möglich direkt auf dem iPhone, ohne Internet."
+        UIApplicationSupportsIndirectInputEvents: true
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    scheme: {}
