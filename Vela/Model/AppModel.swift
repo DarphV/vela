@@ -28,6 +28,8 @@ final class AppModel: ObservableObject {
     @Published var openSource: VelaSource?
     @Published var showSettings = false
     @Published var streamRevision = 0
+    @Published var pendingMacAction: MacAction?
+    @Published var showSwipeHint = !UserDefaults.standard.bool(forKey: VelaSettings.swipeHintKey)
 
     // MARK: Engines
     let driver = VisualDriver()
@@ -36,6 +38,7 @@ final class AppModel: ObservableObject {
     let knowledge: LocalKnowledgeStore
     let models: ModelStore
     let brain: VelaEngine
+    let mac = MacConnection()
 
     private var permission: Permission = .unknown
     private var heardText = ""
@@ -75,12 +78,19 @@ final class AppModel: ObservableObject {
         models.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.objectWillChange.send() }
         }.store(in: &cancellables)
+        mac.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.objectWillChange.send() }
+        }.store(in: &cancellables)
+        brain.onMacAction = { [weak self] action in
+            self?.handleMac(action)
+        }
         prepareScreenshotIfNeeded()
     }
 
     private func prepareScreenshotIfNeeded() {
         guard let kind = ScreenshotLaunch.kind else { return }
         showSplash = false
+        showSwipeHint = false
         switch kind {
         case .voiceNebula:
             driver.design = 0
@@ -450,5 +460,44 @@ final class AppModel: ObservableObject {
 
     func previewVoice(id: String) {
         voice.speak("Hallo, ich bin Vela. So klinge ich mit dieser Stimme.", voiceID: id)
+    }
+
+    func setMic(_ enabled: Bool) {
+        guard enabled != micEnabled else { return }
+        toggleMic()
+    }
+
+    func dismissSwipeHint() {
+        guard showSwipeHint else { return }
+        showSwipeHint = false
+        UserDefaults.standard.set(true, forKey: VelaSettings.swipeHintKey)
+    }
+
+    func handleMac(_ action: MacAction) {
+        guard mac.isPaired else {
+            showToast("Zuerst den Mac unter Einstellungen koppeln.")
+            return
+        }
+        if action.risky {
+            pendingMacAction = action
+        } else {
+            Task { await runMac(action) }
+        }
+    }
+
+    func approvePendingMac() {
+        guard let action = pendingMacAction else { return }
+        pendingMacAction = nil
+        Task { await runMac(action) }
+    }
+
+    private func runMac(_ action: MacAction) async {
+        let result = await mac.perform(action)
+        showToast(result)
+        if mode == .chat {
+            messages.append(.assistant(VelaAnswer(blocks: [.paragraph(result)], spoken: result, sources: [], isDemo: false)))
+        } else if VelaSettings.ttsEnabled {
+            voice.enqueue(result, voiceID: VelaSettings.voiceID)
+        }
     }
 }

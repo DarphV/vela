@@ -29,6 +29,12 @@
 	<string>Vela hört dir zu, wenn du im Sprachmodus mit ihr sprichst. Die Sprache wird nur zur Erkennung deiner Frage verwendet und nicht gespeichert.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Vela wandelt deine gesprochenen Fragen in Text um – wenn möglich direkt auf dem iPhone, ohne Internet.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Vela sucht deinen Mac im lokalen Netzwerk, um sich zu koppeln. Es wird nichts über das Internet geschickt.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_vela._tcp</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

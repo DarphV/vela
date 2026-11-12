@@ -87,6 +87,10 @@ Apple Intelligence ist eine zweite Engine, nur wenn iOS 26 sie auf dem Gerät fr
 
 Dokumente (PDF, Text, Markdown, DOCX) werden auf dem Gerät in Abschnitte zerlegt. Vektoren kommen von NaturalLanguage, wenn das deutsche Modell schon auf dem iPhone liegt, sonst eine Stichwortsuche. „Im Dokument öffnen“ zeigt die PDF-Seite. Fakten wie „Ich heiße …“ oder „Merke dir …“ bleiben lokal und zählen im Gedächtnis-Chip mit.
 
+## Mac-Verbindung
+
+`MacCompanion/` baut den lokalen Dienst `vela-macd` (Artefakt `VelaMac-daemon`). Er meldet sich per Bonjour `_vela._tcp` und spricht nur im eigenen Netz. Kopplung mit einem 6-stelligen Code, danach HMAC. Details und die nötigen macOS-Rechte stehen in `MacCompanion/README.md`. In der App: Einstellungen › Mac-Verbindung. „Öffne Safari auf dem Mac“ geht über das Gehirn; heikle Aktionen fragen vorher nach.
+
 ## Nächste Schritte
 
 1. Natürliche Offline-Stimme und die Websuche.

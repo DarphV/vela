@@ -85,6 +85,11 @@ struct ChatView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: ImportTypes.allowed, allowsMultipleSelection: false) { result in
             model.importFile(result)
         }
+        .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
+            guard value.translation.height > 90, abs(value.translation.height) > abs(value.translation.width) * 1.3,
+                  value.startLocation.y < 220 else { return }
+            model.toVoice()
+        })
     }
 
     private func send() {

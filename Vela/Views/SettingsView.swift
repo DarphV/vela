@@ -20,6 +20,8 @@ struct SettingsView: View {
     @AppStorage(VelaSettings.engineKey) private var engine = VelaEngineKind.local.rawValue
 
     @State private var importing = false
+    @State private var macCode = ""
+    @State private var pairingPeer: MacPeer?
 
     @State private var thumbnails: [VisualDriver] = VelaDesign.allCases.map { VisualDriver.thumbnail(design: $0.rawValue) }
     @State private var voices: [AVSpeechSynthesisVoice] = []
@@ -63,6 +65,19 @@ struct SettingsView: View {
 
                 SectionTitle("KI-Modell")
                 modelGroup
+
+                SectionTitle("Mac-Verbindung")
+                macSection
+
+                SectionTitle("Mikrofon")
+                SettingsGroup {
+                    Toggle(isOn: Binding(get: { model.micEnabled }, set: { model.setMic($0) })) {
+                        RowLabel(icon: "mic", title: "Zuhören", subtitle: "Im Sprachmodus, ohne extra Schalter auf dem Bild")
+                    }
+                    .toggleStyle(VelaToggleStyle())
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
 
                 SectionTitle("Wissen")
                 SettingsGroup {
@@ -217,6 +232,90 @@ struct SettingsView: View {
             }
             .accessibilityElement(children: .contain)
         }
+    }
+
+    private var macSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SettingsGroup {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(model.mac.status)
+                        .velaText(15)
+                        .foregroundStyle(.white)
+                    Button(model.mac.isPaired ? "Verbindung trennen" : "Macs suchen") {
+                        if model.mac.isPaired {
+                            Task { await model.mac.unpair() }
+                        } else {
+                            model.mac.startSearch()
+                        }
+                    }
+                    .velaText(15.5, weight: .semibold)
+                    .foregroundStyle(Color.rgba(185, 160, 255))
+                    if !model.mac.isPaired {
+                        ForEach(model.mac.peers) { peer in
+                            Button {
+                                pairingPeer = peer
+                            } label: {
+                                HStack {
+                                    Text(peer.name)
+                                        .velaText(15)
+                                        .foregroundStyle(.white)
+                                    Spacer()
+                                    Text(pairingPeer == peer ? "ausgewählt" : "wählen")
+                                        .velaText(12.5)
+                                        .foregroundStyle(.white.opacity(0.45))
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if pairingPeer != nil {
+                            TextField("6-stelliger Code", text: $macCode)
+                                .keyboardType(.numberPad)
+                                .textContentType(.oneTimeCode)
+                                .velaText(17)
+                                .foregroundStyle(.white)
+                            Button("Koppeln") {
+                                guard let peer = pairingPeer else { return }
+                                let code = macCode
+                                Task {
+                                    let message = await model.mac.pair(with: peer, code: code)
+                                    model.showToast(message)
+                                }
+                            }
+                            .velaText(15.5, weight: .semibold)
+                            .foregroundStyle(Color.rgba(185, 160, 255))
+                            .disabled(macCode.count < 6)
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if model.mac.isPaired {
+                SettingsGroup {
+                    permissionToggle("openApp", "Apps öffnen")
+                    permissionToggle("openURL", "Adressen öffnen")
+                    permissionToggle("shortcut", "Kurzbefehle")
+                    permissionToggle("applescript", "Erlaubte Skripte")
+                    permissionToggle("type", "Text tippen")
+                    permissionToggle("media", "Medien")
+                    permissionToggle("volume", "Lautstärke")
+                    permissionToggle("screenshot", "Screenshot")
+                    permissionToggle("clipboard", "Zwischenablage")
+                    permissionToggle("apps", "Laufende Apps")
+                }
+            }
+        }
+    }
+
+    private func permissionToggle(_ key: String, _ title: String) -> some View {
+        Toggle(isOn: Binding(get: { model.mac.permissions[key] ?? false }, set: { value in
+            Task { await model.mac.setPermission(key, value) }
+        })) {
+            Text(title).velaText(15).foregroundStyle(.white)
+        }
+        .toggleStyle(VelaToggleStyle())
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     // MARK: Design

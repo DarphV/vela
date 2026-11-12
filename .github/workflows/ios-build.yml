@@ -83,6 +83,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Mac-Daemon bauen
+        run: |
+          set -euo pipefail
+          cd MacCompanion
+          swift build -c release --product vela-macd
+          cp .build/release/vela-macd ../VelaMac-daemon
+          chmod +x ../VelaMac-daemon
+
+      - name: Mac-Daemon hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: VelaMac-daemon
+          path: VelaMac-daemon
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Simulator-Screenshots
         run: bash scripts/capture-screenshots.sh
 

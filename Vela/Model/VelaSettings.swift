@@ -13,6 +13,7 @@ enum VelaSettings {
     static let ttsKey = "vela.tts"              // Bool: Antworten vorlesen (default true)
     static let webSearchKey = "vela.webSearch"  // Bool: Websuche erlauben (Platzhalter, default false)
     static let engineKey = "vela.engine"        // VelaEngineKind: local, apple, demo
+    static let swipeHintKey = "vela.swipeHint"  // Bool: first-launch swipe hint already shown
 
     static var design: Int { UserDefaults.standard.integer(forKey: designKey) }
     static var engine: VelaEngineKind {

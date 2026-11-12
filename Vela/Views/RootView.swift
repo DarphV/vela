@@ -81,16 +81,32 @@ struct RootView: View {
                     travelRing(L)
                     avatarRing(L)
 
-                    VoiceModeView(layout: L)
-                        .opacity(isChat || model.showSplash ? 0 : 1)
-                        .allowsHitTesting(!isChat && !model.showSplash)
-                        .animation(.easeOut(duration: 0.45), value: isChat)
-
                     header(L)
+                        .opacity(isChat ? 1 : 0)
+                        .allowsHitTesting(isChat)
+                        .animation(.easeInOut(duration: 0.35), value: isChat)
+
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .allowsHitTesting(!isChat && !model.showSplash && !model.showSettings)
+                        .gesture(homeDrag)
                 }
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
             }
             .ignoresSafeArea(.keyboard)
+
+            if model.showSwipeHint && !isChat && !model.showSplash && ScreenshotLaunch.kind == nil {
+                VStack {
+                    Spacer()
+                    Text("Nach oben für den Chat\nNach unten für Einstellungen")
+                        .multilineTextAlignment(.center)
+                        .velaText(13)
+                        .foregroundStyle(.white.opacity(0.42))
+                        .padding(.bottom, 28)
+                }
+                .transition(.opacity)
+                .allowsHitTesting(false)
+            }
 
             toastView
 
@@ -115,6 +131,21 @@ struct RootView: View {
         .onChange(of: reduceMotion, initial: true) { _, value in
             model.driver.reduceMotion = value
         }
+        .confirmationDialog(
+            "Auf dem Mac ausführen?",
+            isPresented: Binding(get: { model.pendingMacAction != nil }, set: { if !$0 { model.pendingMacAction = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Ausführen") { model.approvePendingMac() }
+            Button("Abbrechen", role: .cancel) { model.pendingMacAction = nil }
+        } message: {
+            Text(model.pendingMacAction?.summary ?? "")
+        }
+        .accessibilityAction(named: "Textmodus") { model.toChat() }
+        .accessibilityAction(named: "Einstellungen") {
+            model.settingsWillOpen()
+            model.showSettings = true
+        }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active: model.sceneBecameActive()
@@ -122,6 +153,30 @@ struct RootView: View {
             default: break
             }
         }
+    }
+
+    private var homeDrag: some Gesture {
+        DragGesture(minimumDistance: 28, coordinateSpace: .local)
+            .onEnded { value in
+                guard !model.showSplash, !model.showSettings else { return }
+                let dx = value.translation.width
+                let dy = value.translation.height
+                if value.startLocation.x < 28, dx > 56 {
+                    revealSettings()
+                } else if dy < -64, abs(dy) > abs(dx) {
+                    model.dismissSwipeHint()
+                    if !isChat { model.toChat() }
+                } else if dy > 64, abs(dy) > abs(dx) {
+                    model.dismissSwipeHint()
+                    if isChat { model.toVoice() } else { revealSettings() }
+                }
+            }
+    }
+
+    private func revealSettings() {
+        model.dismissSwipeHint()
+        model.settingsWillOpen()
+        model.showSettings = true
     }
 
     // MARK: Stage

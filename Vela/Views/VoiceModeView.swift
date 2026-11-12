@@ -17,14 +17,6 @@ struct VoiceModeView: View {
         let L = layout
         let statusTop = L.centerY + L.stage * 0.405
         ZStack(alignment: .topLeading) {
-            // Tap target: whole screen
-            Color.black.opacity(0.001)
-                .frame(width: L.width, height: L.height)
-                .position(x: L.width / 2, y: L.y(L.height / 2))
-                .onTapGesture { model.toChat() }
-                .accessibilityLabel("Zum Textmodus wechseln")
-                .accessibilityAddTraits(.isButton)
-
             StatusLine(state: model.state)
                 .frame(width: L.width)
                 .position(x: L.width / 2, y: L.y(statusTop + 23))

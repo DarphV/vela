@@ -20,6 +20,7 @@ final class VelaEngine: VelaBrain {
     let local: LocalLLMBrain
     let apple: AppleIntelligenceBrain
     private let models: ModelStore
+    var onMacAction: ((MacAction) -> Void)?
 
     init(knowledge: LocalKnowledgeStore, models: ModelStore) {
         self.models = models
@@ -63,6 +64,14 @@ final class VelaEngine: VelaBrain {
     }
 
     func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) -> Void) async -> VelaAnswer {
+        if let action = MacToolRouter.match(question) {
+            onMacAction?(action)
+            let text = action.risky
+                ? "Ich frage kurz nach, bevor ich das auf dem Mac mache."
+                : "Ich mache das auf dem Mac."
+            onUpdate(text)
+            return VelaAnswer(blocks: [.paragraph(text)], spoken: text, sources: [], isDemo: false)
+        }
         let brain: any VelaBrain
         switch resolved {
         case .local: brain = local
