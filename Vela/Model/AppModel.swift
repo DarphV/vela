@@ -46,6 +46,9 @@ final class AppModel: ObservableObject {
     private var toastTask: Task<Void, Never>?
     private var restartFailures = 0
     private var spokenPrefix = ""
+    private var speechStarted = false
+    private var speechArmedAt: Date?
+    private var replyToken = 0
     private var replyFinished = false
     private var cancellables = Set<AnyCancellable>()
 
@@ -59,8 +62,13 @@ final class AppModel: ObservableObject {
 
         driver.design = VelaSettings.design
         driver.state = state
-        let listener = self.listener
-        driver.levelProvider = { listener.level }
+        voice.playback = listener
+        let speech = voice
+        driver.levelProvider = { [weak speech, weak listener] in
+            let spoken = speech?.outputLevel ?? 0
+            if spoken > 0.01 { return spoken }
+            return listener?.level ?? 0
+        }
 
         listener.onResult = { [weak self] text, isFinal in
             self?.handleRecognition(text: text, isFinal: isFinal)
@@ -205,25 +213,33 @@ final class AppModel: ObservableObject {
         startListening()
     }
 
-    private func startListening() {
+    private func startListening(duringSpeech: Bool = false) {
         guard mode == .voice, !showSplash, !showSettings, permission == .granted else { return }
         guard micEnabled else {
-            setState(.idle)
-            subline = "Mikrofon aus"
+            if !duringSpeech {
+                setState(.idle)
+                subline = "Mikrofon aus"
+            }
             return
         }
-        guard state != .thinking, state != .speaking else { return }
-        heardText = ""
+        if !duringSpeech {
+            guard state != .thinking, state != .speaking else { return }
+            heardText = ""
+        }
         silenceTask?.cancel()
         do {
             try listener.start(hints: knowledge.speechHints)
             driver.micActive = true
-            setState(.listening)
-            subline = listener.isOnDevice ? "Offline-Spracherkennung aktiv" : "Spracherkennung aktiv"
+            if !duringSpeech {
+                setState(.listening)
+                subline = listener.isOnDevice ? "Offline-Spracherkennung aktiv" : "Spracherkennung aktiv"
+            }
         } catch {
             driver.micActive = false
-            setState(.idle)
-            subline = error.localizedDescription
+            if !duringSpeech {
+                setState(.idle)
+                subline = error.localizedDescription
+            }
         }
     }
 
@@ -234,25 +250,39 @@ final class AppModel: ObservableObject {
     }
 
     private func handleRecognition(text: String, isFinal: Bool) {
-        guard mode == .voice, state == .listening else { return }
+        guard mode == .voice else { return }
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
+        if state == .speaking || state == .thinking {
+            guard t.count >= 3 else { return }
+            bargeIn(heard: t, isFinal: isFinal)
+            return
+        }
+        guard state == .listening else { return }
         heardText = t
         subline = "„\(t)“"
         restartFailures = 0
         silenceTask?.cancel()
+        // A final transcript starts the reply immediately. Partials end after ~0.8 s of silence.
         if isFinal {
             finishUtterance()
             return
         }
         silenceTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(1200))
+            try? await Task.sleep(for: .milliseconds(800))
             guard !Task.isCancelled else { return }
             self?.finishUtterance()
         }
     }
 
     private func handleRecognitionEnded(_ error: Error?) {
+        if mode == .voice, state == .speaking || state == .thinking {
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(180))
+                self?.startListening(duringSpeech: true)
+            }
+            return
+        }
         guard mode == .voice, state == .listening else { return }
         if !heardText.isEmpty {
             finishUtterance()
@@ -284,6 +314,30 @@ final class AppModel: ObservableObject {
         Task { await ask(question, fromVoice: true) }
     }
 
+    /// The user started talking over Vela. Cut playback and take the new turn.
+    private func bargeIn(heard: String, isFinal: Bool) {
+        replyToken += 1
+        voice.stop()
+        spokenPrefix = ""
+        speechStarted = false
+        speechArmedAt = nil
+        replyFinished = true
+        heardText = heard
+        setState(.listening)
+        subline = "„\(heard)“"
+        restartFailures = 0
+        silenceTask?.cancel()
+        if isFinal {
+            finishUtterance()
+            return
+        }
+        silenceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(800))
+            guard !Task.isCancelled else { return }
+            self?.finishUtterance()
+        }
+    }
+
     // MARK: - Asking
 
     func sendText(_ text: String) {
@@ -294,8 +348,12 @@ final class AppModel: ObservableObject {
     }
 
     private func ask(_ question: String, fromVoice: Bool) async {
+        replyToken += 1
+        let token = replyToken
         voice.stop()
         spokenPrefix = ""
+        speechStarted = false
+        speechArmedAt = nil
         replyFinished = false
         knowledge.rememberIfPersonal(question)
         messages.append(.user(question))
@@ -304,9 +362,10 @@ final class AppModel: ObservableObject {
             isTyping = true
         }
         setState(.thinking)
+        if fromVoice { startListening(duringSpeech: true) }
         var messageID: UUID?
         let answer = await brain.streamAnswer(to: question, history: messages) { [weak self] text in
-            guard let self else { return }
+            guard let self, token == self.replyToken else { return }
             self.isTyping = false
             if messageID == nil {
                 var message = ChatMessage.assistant(VelaAnswer(blocks: [.paragraph(text)], spoken: text, sources: [], isDemo: false))
@@ -319,8 +378,9 @@ final class AppModel: ObservableObject {
                 self.messages[index].answer = VelaAnswer(blocks: [.paragraph(text)], spoken: text, sources: [], isDemo: false)
             }
             self.streamRevision += 1
-            self.speakNewSentences(in: text, flush: false)
+            self.feedSpeech(text, flush: false)
         }
+        guard token == replyToken else { return }
         isTyping = false
         if let id = messageID, let index = messages.firstIndex(where: { $0.id == id }) {
             messages[index].text = VelaPrompt.joined(answer)
@@ -329,46 +389,106 @@ final class AppModel: ObservableObject {
             messages.append(.assistant(answer))
         }
         streamRevision += 1
-        speakNewSentences(in: VelaPrompt.joined(answer), flush: true)
+        feedSpeech(VelaPrompt.joined(answer), flush: true)
         replyFinished = true
         if !VelaSettings.ttsEnabled || !voice.hasPending {
             speechFinished(cancelled: false)
         }
     }
 
-    private func speakNewSentences(in full: String, flush: Bool) {
+    /// First phrase starts at a clause, ~160 characters, or 600 ms — whichever comes first.
+    /// Later phrases are merged when they are short and queued before the current one ends.
+    private func feedSpeech(_ full: String, flush: Bool) {
         guard VelaSettings.ttsEnabled else { return }
         let spoken = VelaPrompt.spoken(from: full)
-        guard spoken.hasPrefix(spokenPrefix) else {
-            spokenPrefix = ""
-            return
+        guard spoken.hasPrefix(spokenPrefix) else { return }
+        if speechArmedAt == nil, spoken.count > spokenPrefix.count { speechArmedAt = Date() }
+        var rest = String(spoken.dropFirst(spokenPrefix.count))
+        while let taken = takeSpeechChunk(from: rest, first: !speechStarted, flush: flush) {
+            let chunk = taken.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !chunk.isEmpty else { break }
+            AudioSessionManager.activate()
+            voice.enqueue(chunk, voiceID: VelaSettings.voiceID)
+            if mode == .voice { startListening(duringSpeech: true) }
+            setState(.speaking)
+            speechStarted = true
+            spokenPrefix += taken.raw
+            rest = String(rest.dropFirst(taken.raw.count))
         }
-        let start = spoken.index(spoken.startIndex, offsetBy: spokenPrefix.count)
-        var rest = spoken[start...]
-        while true {
-            guard let end = sentenceEnd(in: rest) else { break }
-            let raw = rest[..<end]
-            let piece = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            let used = spoken.distance(from: rest.startIndex, to: end)
-            if piece.count < 8 && !flush { break }
-            if !piece.isEmpty {
-                AudioSessionManager.activate()
-                voice.enqueue(piece, voiceID: VelaSettings.voiceID)
-                setState(.speaking)
+    }
+
+    private func takeSpeechChunk(from rest: String, first: Bool, flush: Bool) -> (text: String, raw: String)? {
+        let lead = rest.prefix { $0.isWhitespace }.count
+        let body = String(rest.dropFirst(lead))
+        guard !body.isEmpty else { return nil }
+        let elapsed = speechArmedAt.map { Date().timeIntervalSince($0) } ?? 0
+        let sentences = sentenceSpans(in: body)
+        let clause = clauseSpan(in: body)
+        let cut: Int
+        if first {
+            if sentences >= 2 || body.count >= 160 || (clause != nil && body.count >= 48) || (elapsed >= 0.6 && body.count >= 16) || (flush && body.count >= 8) {
+                if sentences >= 1, let end = lastBoundary(in: body, max: min(body.count, 200), min: 12) {
+                    cut = end
+                } else if let end = lastBoundary(in: body, max: min(body.count, 200), min: 8) {
+                    cut = end
+                } else if elapsed >= 0.6 || flush {
+                    cut = min(body.count, 200)
+                } else {
+                    return nil
+                }
+            } else {
+                return nil
             }
-            spokenPrefix += String(rest.prefix(used))
-            rest = rest[end...]
-            if rest.isEmpty { break }
+        } else if flush {
+            cut = body.count
+        } else if let end = lastBoundary(in: body, max: 180, min: 36) {
+            cut = end
+        } else {
+            return nil
         }
-        if flush {
-            let tail = rest.trimmingCharacters(in: .whitespacesAndNewlines)
-            if tail.count >= 2 {
-                AudioSessionManager.activate()
-                voice.enqueue(tail, voiceID: VelaSettings.voiceID)
-                setState(.speaking)
-            }
-            spokenPrefix = spoken
+        let rawCount = lead + cut
+        let text = String(body.prefix(cut))
+        return (text, String(rest.prefix(rawCount)))
+    }
+
+    private func sentenceSpans(in text: String) -> Int {
+        var count = 0
+        var index = text.startIndex
+        while index < text.endIndex {
+            if ".!?…".contains(text[index]) { count += 1 }
+            index = text.index(after: index)
         }
+        return count
+    }
+
+    private func clauseSpan(in text: String) -> String.Index? {
+        var index = text.startIndex
+        var seen = 0
+        while index < text.endIndex {
+            if seen > 24, ",;:".contains(text[index]) { return index }
+            seen += 1
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    /// Last sentence or clause end inside `max` characters, at least `min` in.
+    private func lastBoundary(in text: String, max: Int, min: Int) -> Int? {
+        var best: Int?
+        var count = 0
+        var index = text.startIndex
+        while index < text.endIndex, count < max {
+            count += 1
+            let next = text.index(after: index)
+            let mark = text[index]
+            let boundary = ".!?…".contains(mark) || (count >= min && ",;:".contains(mark)) || mark.isNewline
+            if boundary, count >= min { best = count }
+            index = next
+        }
+        if best == nil, count >= min, let space = text.prefix(max).lastIndex(of: " ") {
+            return text.distance(from: text.startIndex, to: space)
+        }
+        return best
     }
 
     private func sentenceEnd(in text: Substring) -> String.Index? {

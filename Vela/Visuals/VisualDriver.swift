@@ -115,7 +115,8 @@ final class VisualDriver {
             var ampT: Float
             switch state {
             case .speaking:
-                ampT = VisualDriver.voiceEnvelope(time / rm) * 0.95
+                let live = levelProvider?() ?? 0
+                ampT = live > 0.02 ? live * 0.95 : (0.05 + 0.02 * sin(time * 1.3))
             case .listening:
                 ampT = micActive ? (levelProvider?() ?? 0) * 0.9 : 0.04 + 0.03 * sin(time * 1.3)
             case .thinking:

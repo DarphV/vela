@@ -16,9 +16,10 @@ enum AudioSessionManager {
         let session = AVAudioSession.sharedInstance()
         do {
             if !configured {
+                // voiceChat turns on echo cancellation so Vela can keep listening while she speaks.
                 try session.setCategory(.playAndRecord,
-                                        mode: .default,
-                                        options: [.defaultToSpeaker, .allowAirPlay, .allowBluetoothA2DP, .duckOthers])
+                                        mode: .voiceChat,
+                                        options: [.defaultToSpeaker, .allowAirPlay, .allowBluetooth])
                 configured = true
             }
             try session.setActive(true, options: [])
