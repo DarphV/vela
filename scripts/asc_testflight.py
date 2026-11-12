@@ -763,6 +763,66 @@ def prepare():
     print("No app extensions. App Intents use " + BUNDLE_ID + ".")
 
 
+def upload_label(attributes):
+    state = attributes.get("state")
+    if isinstance(state, dict):
+        return state.get("state") or "unknown"
+    return state or attributes.get("uploadedState") or "unknown"
+
+
+def watch_upload(version):
+    """Wait until an already uploaded build is VALID. Does not upload again."""
+    if not env("KEY_PATH"):
+        os.environ["KEY_PATH"] = os.path.join(tempfile.gettempdir(), "vela-authkey.p8")
+    write_key()
+    query = urllib.parse.urlencode({"filter[bundleId]": BUNDLE_ID, "limit": "5"})
+    status, payload = api("GET", "/v1/apps?" + query)
+    if status >= 400 or not (payload.get("data") or []):
+        print(f"Could not look up the app record (HTTP {status}).")
+        return 1
+    app_id = payload["data"][0]["id"]
+    deadline = time.time() + 40 * 60
+    while time.time() < deadline:
+        upload_status, upload_payload = api("GET", f"/v1/apps/{app_id}/buildUploads?limit=10")
+        if upload_status >= 400:
+            print(f"Build uploads HTTP {upload_status}")
+            return 1
+        labels = []
+        for item in upload_payload.get("data") or []:
+            attributes = item.get("attributes") or {}
+            item_version = str(attributes.get("cfBundleVersion") or attributes.get("version") or "")
+            if item_version != version:
+                continue
+            label = upload_label(attributes)
+            labels.append(label)
+            print(f"upload {version}: {label}")
+        if "FAILED" in labels:
+            print(f"Apple failed upload {version}.")
+            return 1
+        if "COMPLETE" in labels:
+            print(f"Upload {version} is complete.")
+            return poll(version)
+        query = urllib.parse.urlencode({
+            "filter[app]": app_id,
+            "filter[version]": version,
+            "limit": "5",
+        })
+        build_status, build_payload = api("GET", "/v1/builds?" + query)
+        builds = build_payload.get("data") or [] if build_status < 400 else []
+        if builds:
+            state = (builds[0].get("attributes") or {}).get("processingState") or "unknown"
+            print(f"TestFlight build {version}: {state}")
+            if state == "VALID":
+                print("The build finished processing and is available in TestFlight.")
+                return 0
+            if state in ("FAILED", "INVALID"):
+                print("Apple rejected the build during processing.")
+                return 1
+        time.sleep(60)
+    print(f"Upload {version} was still processing when the wait ended.")
+    return 1
+
+
 def recent():
     """Print the newest TestFlight builds. Does not upload or change certificates."""
     if not env("KEY_PATH"):
@@ -901,6 +961,8 @@ def main():
         raise SystemExit(poll(version))
     elif command == "recent":
         raise SystemExit(recent())
+    elif command == "watch-upload" and len(sys.argv) == 3:
+        raise SystemExit(watch_upload(sys.argv[2]))
     elif command == "scrub" and len(sys.argv) == 3:
         scrub(sys.argv[2])
     elif command == "owner-app":

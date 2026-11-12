@@ -9,13 +9,13 @@ jobs:
   poll:
     name: Build 25 status
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      - name: List recent TestFlight builds
+      - name: Wait until upload 25 is VALID
         env:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
-        run: python3 scripts/asc_testflight.py recent
+        run: python3 scripts/asc_testflight.py watch-upload 25
