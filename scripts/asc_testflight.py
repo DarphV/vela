@@ -355,53 +355,153 @@ def ensure_ci_device():
     )
 
 
-def ensure_bundle_id(team):
+def bundle_resource_id():
     query = urllib.parse.urlencode({"filter[identifier]": BUNDLE_ID, "limit": "5"})
     status, payload = api("GET", "/v1/bundleIds?" + query)
-    if status < 400:
-        for item in payload.get("data") or []:
-            if (item.get("attributes") or {}).get("identifier") == BUNDLE_ID:
-                print(f"Bundle ID already registered: {BUNDLE_ID}")
-                return
+    if status >= 400:
+        return None
+    for item in payload.get("data") or []:
+        if (item.get("attributes") or {}).get("identifier") == BUNDLE_ID:
+            return item.get("id")
+    return None
+
+
+def ensure_bundle_id(team):
+    found = bundle_resource_id()
+    if found:
+        print(f"Bundle ID already registered: {BUNDLE_ID}")
+        return found
     attributes = {"name": APP_NAME, "identifier": BUNDLE_ID, "platform": "IOS"}
     if team:
         attributes["seedId"] = team
     status, payload = api("POST", "/v1/bundleIds", {"data": {"type": "bundleIds", "attributes": attributes}})
     if status in (200, 201):
         print(f"Registered bundle ID {BUNDLE_ID}.")
-        return
+        return (payload.get("data") or {}).get("id") or bundle_resource_id()
     detail = error_text(json.dumps(payload).encode())
     if status == 409 or "already" in detail.lower() or "ENTITY_ERROR" in detail:
         print(f"Bundle ID already registered: {BUNDLE_ID}")
-        return
+        return bundle_resource_id()
     print(f"Could not register bundle ID {BUNDLE_ID} (HTTP {status}).")
     print(detail)
-    print("Continuing; Xcode may register it during automatic signing.")
+    return None
 
 
-def write_export_options(team, method):
+def delete_ci_profiles():
+    status, payload = api("GET", "/v1/profiles?limit=100")
+    if status >= 400:
+        return
+    for item in payload.get("data") or []:
+        if (item.get("attributes") or {}).get("name") != "Vela App Store":
+            continue
+        removed, _ = api("DELETE", "/v1/profiles/" + urllib.parse.quote(item["id"]))
+        if removed in (200, 202, 204):
+            print("Removed the previous CI App Store profile.")
+
+
+def issue_app_store_signing(team):
+    """An App Store profile does not need a registered device. Automatic signing does, and this team has none Xcode accepts."""
+    bundle = ensure_bundle_id(team)
+    if not bundle:
+        fail(f"Bundle ID {BUNDLE_ID} is not registered, so no App Store profile can be created.")
+    work = env("ASC_DIR")
+    key_path = os.path.join(work, "dist.key")
+    csr_path = os.path.join(work, "dist.csr")
+    created = subprocess.run(
+        [
+            "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", key_path, "-out", csr_path,
+            "-subj", "/CN=Vela CI Distribution",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if created.returncode != 0:
+        fail("Could not create a certificate request for App Store signing.")
+    os.chmod(key_path, 0o600)
+    with open(csr_path, "r", encoding="ascii") as handle:
+        csr = handle.read()
+    status, payload = api("POST", "/v1/certificates", {
+        "data": {
+            "type": "certificates",
+            "attributes": {"certificateType": "DISTRIBUTION", "csrContent": csr},
+        }
+    })
+    if status >= 400:
+        print(error_text(json.dumps(payload).encode()))
+        fail(
+            "Could not create an Apple Distribution certificate.\n"
+            "OWNER ACTION: If the account already has the maximum number of distribution certificates,\n"
+            "revoke an unused one under Certificates, Identifiers & Profiles and re-run."
+        )
+    issued = payload.get("data") or {}
+    cert_id = issued.get("id")
+    content = (issued.get("attributes") or {}).get("certificateContent")
+    if not cert_id or not content:
+        fail("App Store Connect did not return the new distribution certificate.")
+    der = base64.b64decode(content)
+    with open(os.path.join(work, "cert.der"), "wb") as handle:
+        handle.write(der)
+    pem = subprocess.run(
+        ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
+        input=der,
+        capture_output=True,
+        check=False,
+    )
+    if pem.returncode != 0:
+        fail("Could not read the distribution certificate.")
+    with open(os.path.join(work, "cert.pem"), "wb") as handle:
+        handle.write(pem.stdout)
+    learned = team_in_text((issued.get("attributes") or {}).get("name") or "") or team_from_certificate(content)
+    if learned:
+        team = learned
+    status, payload = api("POST", "/v1/profiles", {
+        "data": {
+            "type": "profiles",
+            "attributes": {"name": "Vela App Store", "profileType": "IOS_APP_STORE"},
+            "relationships": {
+                "bundleId": {"data": {"type": "bundleIds", "id": bundle}},
+                "certificates": {"data": [{"type": "certificates", "id": cert_id}]},
+            },
+        }
+    })
+    if status >= 400:
+        print(error_text(json.dumps(payload).encode()))
+        fail("Could not create the App Store provisioning profile.")
+    profile_b64 = ((payload.get("data") or {}).get("attributes") or {}).get("profileContent")
+    if not profile_b64:
+        fail("App Store Connect did not return the provisioning profile.")
+    with open(os.path.join(work, "vela.mobileprovision"), "wb") as handle:
+        handle.write(base64.b64decode(profile_b64))
+    print("Created an App Store profile for " + BUNDLE_ID + ". No device is required.")
+    return team
+
+
+def write_export_options(team):
     path = os.path.join(env("ASC_DIR"), "ExportOptions.plist")
     with open(path, "wb") as handle:
         plistlib.dump({
-            "method": method,
+            "method": "app-store-connect",
             "destination": "upload",
-            "signingStyle": "automatic",
+            "signingStyle": "manual",
+            "signingCertificate": "Apple Distribution",
             "teamID": team,
+            "provisioningProfiles": {BUNDLE_ID: "Vela App Store"},
             "uploadSymbols": True,
             "manageAppVersionAndBuildNumber": False,
         }, handle, fmt=plistlib.FMT_XML)
-    print(f"ExportOptions: method {method}, destination upload, signingStyle automatic.")
+    print("ExportOptions: method app-store-connect, destination upload, signingStyle manual, App Store profile.")
 
 
 def prepare():
     write_key()
     team = resolve_team()
+    delete_ci_profiles()
+    revoke_unreferenced_distribution_certs()
+    team = issue_app_store_signing(team)
     with open(os.path.join(env("ASC_DIR"), "team_id"), "w", encoding="ascii") as handle:
         handle.write(team + "\n")
-    revoke_unreferenced_distribution_certs()
-    ensure_ci_device()
-    ensure_bundle_id(team)
-    write_export_options(team, "app-store-connect")
+    write_export_options(team)
     print("No app extensions. App Intents use " + BUNDLE_ID + ".")
 
 
@@ -409,7 +509,7 @@ def owner_app_record():
     print(
         "OWNER ACTION: In App Store Connect gibt es noch keinen App-Eintrag.\n"
         "Apps → + → New App:\n"
-        f"  Name: {APP_NAME}\n"
+        "  Name: Vela KI\n"
         f"  Bundle ID: {BUNDLE_ID}\n"
         f"  SKU: {APP_SKU}\n"
         "  Primäre Sprache: Deutsch (de-DE)\n"

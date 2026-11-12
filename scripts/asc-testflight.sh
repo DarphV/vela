@@ -40,6 +40,9 @@ export ASC_DIR
 export KEY_PATH="${ASC_DIR}/AuthKey_${ASC_KEY_ID}.p8"
 
 cleanup() {
+  if [ -n "${KEYCHAIN_PATH:-}" ]; then
+    security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+  fi
   python3 scripts/asc_testflight.py scrub "$LOG" || true
   rm -rf "$ASC_DIR"
 }
@@ -59,8 +62,37 @@ if ! [[ "$TEAM" =~ ^[A-Z0-9]{10}$ ]]; then
   exit 1
 fi
 
+install_signing_assets() {
+  local pass decoded uuid
+  pass="$(openssl rand -hex 18)"
+  KEYCHAIN_PATH="${ASC_DIR}/signing.keychain-db"
+  security create-keychain -p "$pass" "$KEYCHAIN_PATH"
+  security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+  security unlock-keychain -p "$pass" "$KEYCHAIN_PATH"
+  security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+  security default-keychain -s "$KEYCHAIN_PATH"
+  if ! openssl pkcs12 -export -legacy \
+      -inkey "${ASC_DIR}/dist.key" -in "${ASC_DIR}/cert.pem" \
+      -out "${ASC_DIR}/dist.p12" -passout pass:"$pass"; then
+    openssl pkcs12 -export \
+      -inkey "${ASC_DIR}/dist.key" -in "${ASC_DIR}/cert.pem" \
+      -out "${ASC_DIR}/dist.p12" -passout pass:"$pass"
+  fi
+  security import "${ASC_DIR}/dist.p12" -k "$KEYCHAIN_PATH" -P "$pass" -A -t cert -t priv -f pkcs12
+  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pass" "$KEYCHAIN_PATH" >/dev/null
+  decoded="${ASC_DIR}/profile.plist"
+  security cms -D -i "${ASC_DIR}/vela.mobileprovision" > "$decoded"
+  uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$decoded")"
+  mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+  cp "${ASC_DIR}/vela.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/${uuid}.mobileprovision"
+  echo "Signing identity:"
+  security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+}
+
+install_signing_assets > >(tee -a "$LOG") 2>&1
+
 ARCHIVE="${ASC_DIR}/Vela.xcarchive"
-echo "Archiving (automatic cloud signing)" | tee -a "$LOG"
+echo "Archiving with the App Store profile" | tee -a "$LOG"
 run_logged xcodebuild \
   -project Vela.xcodeproj \
   -scheme Vela \
@@ -78,7 +110,9 @@ run_logged xcodebuild \
   CURRENT_PROJECT_VERSION="$BUILD" \
   PRODUCT_BUNDLE_IDENTIFIER="de.barczewski.vela" \
   DEVELOPMENT_TEAM="$TEAM" \
-  CODE_SIGN_STYLE=Automatic \
+  CODE_SIGN_STYLE=Manual \
+  CODE_SIGN_IDENTITY="Apple Distribution" \
+  PROVISIONING_PROFILE_SPECIFIER="Vela App Store" \
   CODE_SIGNING_ALLOWED=YES \
   CODE_SIGNING_REQUIRED=YES \
   archive

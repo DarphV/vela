@@ -32,6 +32,8 @@ final class ModelStore: ObservableObject {
     @Published private(set) var phase: Phase = .missing
     @Published private(set) var detail = "ca. 1,0 GB · wird einmalig geladen"
     @Published private(set) var fraction: Double = 0
+    @Published private(set) var completedBytes: Int64 = 0
+    @Published private(set) var totalBytes: Int64 = 0
 
     private var container: ModelContainer?
     private var loadTask: Task<ModelContainer, Error>?
@@ -39,6 +41,20 @@ final class ModelStore: ObservableObject {
         id: ModelStore.repoID,
         extraEOSTokens: ["<|im_end|>", "<|endoftext|>"]
     )
+
+    /// Incomplete files from an earlier attempt. A new download continues them.
+    var hasPartialDownload: Bool {
+        !isInstalled && directorySize(modelDirectory) > 1_048_576
+    }
+
+    /// Percent plus megabytes, for the first-launch progress bar.
+    var progressText: String {
+        let percent = Int((fraction * 100).rounded())
+        if totalBytes > 10_000 {
+            return "\(percent) % · \(Self.format(completedBytes)) von \(Self.format(totalBytes))"
+        }
+        return "\(percent) % · ca. 1,0 GB"
+    }
 
     var isInstalled: Bool {
         let directory = modelDirectory
@@ -61,6 +77,8 @@ final class ModelStore: ObservableObject {
         guard loadTask == nil else { return }
         phase = .downloading(0)
         fraction = 0
+        completedBytes = 0
+        totalBytes = 0
         detail = "Verbindung …"
         loadTask = Task { [weak self] in
             guard let self else { throw CancellationError() }
@@ -80,7 +98,7 @@ final class ModelStore: ObservableObject {
                 self.loadTask = nil
                 self.container = nil
                 self.phase = .failed(error.localizedDescription)
-                self.detail = error.localizedDescription
+                self.detail = "Download unterbrochen. Erneut versuchen setzt ihn fort."
             }
         }
     }
@@ -169,12 +187,10 @@ final class ModelStore: ObservableObject {
     fileprivate func apply(fraction: Double, completed: Int64, total: Int64) {
         let value = fraction.isFinite ? min(1, max(0, fraction)) : 0
         self.fraction = value
+        completedBytes = max(0, completed)
+        totalBytes = max(0, total)
         phase = .downloading(value)
-        if total > 10_000 {
-            detail = "\(Self.format(completed)) von \(Self.format(total))"
-        } else {
-            detail = "\(Int(value * 100)) % · ca. 1,0 GB"
-        }
+        detail = progressText
     }
 
     static func format(_ bytes: Int64) -> String {
@@ -182,6 +198,7 @@ final class ModelStore: ObservableObject {
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file
         formatter.includesUnit = true
+        formatter.locale = Locale(identifier: "de_DE")
         return formatter.string(fromByteCount: max(0, bytes))
     }
 }

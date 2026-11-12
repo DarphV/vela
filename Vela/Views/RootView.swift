@@ -95,7 +95,7 @@ struct RootView: View {
             }
             .ignoresSafeArea(.keyboard)
 
-            if model.showSwipeHint && !isChat && !model.showSplash && ScreenshotLaunch.kind == nil {
+            if model.showSwipeHint && !isChat && !model.showSplash && !model.showOnboarding && ScreenshotLaunch.kind == nil {
                 VStack {
                     Spacer()
                     Text("Nach oben für den Chat\nNach unten für Einstellungen")
@@ -114,6 +114,12 @@ struct RootView: View {
                 SplashView { model.splashFinished() }
                     .transition(.opacity)
                     .zIndex(10)
+            }
+
+            if model.showOnboarding {
+                ModelOnboardingView()
+                    .transition(.opacity)
+                    .zIndex(9)
             }
         }
         .preferredColorScheme(.dark)
