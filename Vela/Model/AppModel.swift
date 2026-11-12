@@ -25,6 +25,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var micEnabled = true
     @Published private(set) var toast: String?
     @Published private(set) var showSplash = true
+    @Published private(set) var showOnboarding = false
     @Published var openSource: VelaSource?
     @Published var showSettings = false
     @Published var streamRevision = 0
@@ -165,13 +166,37 @@ final class AppModel: ObservableObject {
         guard showSplash else { return }
         showSplash = false
         guard ScreenshotLaunch.kind == nil else { return }
+        if needsModelOnboarding {
+            showOnboarding = true
+            return
+        }
         Task { await startVoiceSession() }
+    }
+
+    private var needsModelOnboarding: Bool {
+        ScreenshotLaunch.kind == nil
+            && !UserDefaults.standard.bool(forKey: VelaSettings.modelOnboardingKey)
+            && !models.isInstalled
+            && VelaSettings.engine == .local
+    }
+
+    func finishModelOnboarding() {
+        guard showOnboarding else { return }
+        UserDefaults.standard.set(true, forKey: VelaSettings.modelOnboardingKey)
+        showOnboarding = false
+        Task { await startVoiceSession() }
+    }
+
+    func useAppleIntelligenceFromOnboarding() {
+        models.cancelDownload()
+        UserDefaults.standard.set(VelaEngineKind.apple.rawValue, forKey: VelaSettings.engineKey)
+        finishModelOnboarding()
     }
 
     func sceneBecameActive() {
         guard ScreenshotLaunch.kind == nil else { return }
         AudioSessionManager.activate()
-        if mode == .voice && !showSplash && !showSettings {
+        if mode == .voice && !showSplash && !showSettings && !showOnboarding {
             Task { await startVoiceSession() }
         }
     }
@@ -214,7 +239,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startListening(duringSpeech: Bool = false) {
-        guard mode == .voice, !showSplash, !showSettings, permission == .granted else { return }
+        guard mode == .voice, !showSplash, !showOnboarding, !showSettings, permission == .granted else { return }
         guard micEnabled else {
             if !duringSpeech {
                 setState(.idle)

@@ -30,7 +30,7 @@ beim Antippen in den **Glas-Chat**, zeigt zu jeder Antwort die **Quelle** und l�
 vela-ios/
 ├─ project.yml                  XcodeGen-Projektbeschreibung (daraus entsteht Vela.xcodeproj)
 ├─ Support/Info.plist           wird von XcodeGen erzeugt (deutsche Texte für Mikrofon/Sprache)
-├─ .github/workflows/ios-build.yml   Cloud-Build auf einem GitHub-Mac → unsignierte .ipa
+├─ .github/workflows/ios-build.yml   Cloud-Build → unsignierte .ipa und TestFlight
 └─ Vela/
    ├─ App/VelaApp.swift         Einstieg
    ├─ Model/                    AppModel (Ablauf Sprachmodus ⇄ Chat), Nachrichten, Einstellungen
@@ -51,6 +51,15 @@ vela-ios/
    **ohne Signatur**.
 3. Nach ca. 5–10 Minuten unter dem Lauf bei **Artifacts** `Vela-unsigned-ipa` herunterladen und
    entpacken → `Vela-unsigned.ipa`.
+4. Derselbe Workflow startet parallel **Vela (TestFlight)**. Der Job signiert mit einem
+   gespeicherten Distribution-Zertifikat (`VELA_DIST_P12_BASE64` und `VELA_DIST_P12_PASSWORD`)
+   und lädt nach App Store Connect hoch. Er legt keine Zertifikate an und widerruft keine.
+   Einmalig legt **Actions › Create signing cert** das Zertifikat an, aber nur wenn noch
+   Platz unter Apples Limit von drei Apple-Distribution-Zertifikaten ist. Dafür braucht das
+   Repository das Secret `GH_SECRETS_TOKEN` (fein granuliertes PAT, Secrets lesen/schreiben
+   auf `DarphV/vela`) plus `ASC_ISSUER_ID`, `ASC_KEY_ID` und `ASC_PRIVATE_KEY`.
+   Die Build-Nummer ist `github.run_number`, die Bundle-ID `de.barczewski.vela`.
+   Der Name auf dem Home-Bildschirm bleibt **Vela**. `ITSAppUsesNonExemptEncryption` ist aus.
 
 ## Auf das iPhone bringen (Sideloadly, kostenlose Apple-ID)
 

@@ -56,6 +56,7 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSRequiresIPhoneOS: true
+        UIRequiresFullScreen: true
         ITSAppUsesNonExemptEncryption: false
         NSMicrophoneUsageDescription: "Vela hört dir zu, wenn du im Sprachmodus mit ihr sprichst. Die Sprache wird nur zur Erkennung deiner Frage verwendet und nicht gespeichert."
         NSSpeechRecognitionUsageDescription: "Vela wandelt deine gesprochenen Fragen in Text um – wenn möglich direkt auf dem iPhone, ohne Internet."
