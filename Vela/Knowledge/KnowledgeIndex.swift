@@ -206,7 +206,7 @@ final class KnowledgeIndex {
     }
 
     private func bind(_ statement: OpaquePointer, _ index: Int32, _ value: String) {
-        sqlite3_bind_self.text(statement, index, value, -1, transient)
+        sqlite3_bind_text(statement, index, value, -1, transient)
     }
 
     private func bind(_ statement: OpaquePointer, _ index: Int32, _ values: [Float]) {
@@ -220,7 +220,7 @@ final class KnowledgeIndex {
     }
 
     private func text(_ statement: OpaquePointer, _ index: Int32) -> String {
-        guard let cString = sqlite3_column_self.text(statement, index) else { return "" }
+        guard let cString = sqlite3_column_text(statement, index) else { return "" }
         return String(cString: cString)
     }
 
