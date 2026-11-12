@@ -215,7 +215,7 @@ final class AppModel: ObservableObject {
 
     private var needsModelOnboarding: Bool {
         ScreenshotLaunch.kind == nil
-            && !UserDefaults.standard.bool(forKey: VelaSettings.modelOnboardingKey)
+            && !models.safeMode
             && !models.isInstalled
             && VelaSettings.engine == .local
     }

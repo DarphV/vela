@@ -9,11 +9,13 @@ import Foundation
 
 enum VelaPrompt {
     static let system = """
-    Du bist Vela, eine freundliche und präzise Assistentin. Du antwortest auf Deutsch, klar und ohne Umschweife.
-    Wenn die Frage sich aus den mitgelieferten Dokumentstellen beantworten lässt, stütze dich nur darauf und nenne die Quelle im Text als [1], [2] und so weiter.
-    Erfinde keine Stellen, keine Seitenzahlen und keine Zitate. Wenn die Dokumente die Frage nicht hergeben oder du unsicher bist, sag das ehrlich.
-    Nutze die bekannten Fakten über die Person nur, wenn sie zur Frage passen.
-    Antworte in normaler Sprache. Keine Überschriften.
+    Du bist Vela, eine freundliche und präzise Assistentin.
+    Antworte immer auf Deutsch, auch wenn die Frage in einer anderen Sprache gestellt wird.
+    Sei knapp: meist zwei bis vier Sätze. Nur wenn ausdrücklich mehr verlangt wird, antworte ausführlicher.
+    Wenn Dokumentstellen mitgeliefert sind und die Frage daraus beantwortbar ist, stütze dich nur auf sie und nenne die Quelle im Satz als [1], [2] und so weiter.
+    Erfinde keine Stellen, Seitenzahlen oder Zitate. Wenn die Dokumente die Frage nicht hergeben oder du unsicher bist, sag das in einem Satz.
+    Nutze bekannte Fakten über die Person nur, wenn sie zur Frage passen.
+    Keine Überschriften und kein Markdown.
     """
 
     static func user(question: String, history: [ChatMessage], passages: [KnowledgePassage], facts: [MemoryFact]) -> String {
@@ -41,7 +43,7 @@ enum VelaPrompt {
     }
 
     static func blocks(from text: String) -> [AnswerBlock] {
-        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else {
             return [.paragraph("Dazu kann ich gerade nichts Sicheres sagen.")]
         }
@@ -60,11 +62,25 @@ enum VelaPrompt {
     }
 
     static func spoken(from text: String) -> String {
-        var result = text.replacingOccurrences(of: "**", with: "")
+        var result = withoutThinking(text).replacingOccurrences(of: "**", with: "")
         result = result.replacingOccurrences(of: #"\[\d+\]"#, with: "", options: .regularExpression)
         result = result.replacingOccurrences(of: "•", with: "")
         while result.contains("  ") { result = result.replacingOccurrences(of: "  ", with: " ") }
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Drops a Qwen3 thinking block so the chat and the voice never read it.
+    static func withoutThinking(_ text: String) -> String {
+        var result = text
+        while let start = result.range(of: "<think>", options: .caseInsensitive),
+              let end = result.range(of: "</think>", options: .caseInsensitive),
+              start.lowerBound <= end.lowerBound {
+            result.removeSubrange(start.lowerBound..<end.upperBound)
+        }
+        if let start = result.range(of: "<think>", options: .caseInsensitive) {
+            result = String(result[..<start.lowerBound])
+        }
+        return result
     }
 
     static func joined(_ answer: VelaAnswer) -> String {

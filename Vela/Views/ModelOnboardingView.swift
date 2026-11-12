@@ -2,8 +2,9 @@
 //  ModelOnboardingView.swift
 //  Vela
 //
-//  First launch: the offline model is about 1 GB and is not on the phone yet.
-//  The home screen stays named Vela; this card only explains the one-time download.
+//  First launch: the offline model is not on the phone yet. Capable phones
+//  are asked for Qwen3 4B (about 2.3 GB). Others stay on the 1.5B model.
+//  The home screen stays named Vela.
 //
 
 import SwiftUI
@@ -41,7 +42,7 @@ struct ModelOnboardingView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityAddTraits(.isHeader)
 
-            Text("Vela antwortet auf dem iPhone. Dafür wird die KI einmalig geladen, etwa 1 GB. Danach bleiben die Fragen auf dem Gerät. Am besten über WLAN.")
+            Text("Vela antwortet auf dem iPhone. Dafür wird \(model.models.selected.title) einmalig geladen, etwa \(model.models.selected.sizeLabel). Danach bleiben die Fragen auf dem Gerät. Am besten über WLAN.")
                 .velaText(16)
                 .foregroundStyle(.white.opacity(0.78))
                 .fixedSize(horizontal: false, vertical: true)
@@ -59,6 +60,23 @@ struct ModelOnboardingView: View {
                     .velaText(14)
                     .foregroundStyle(Color.rgba(255, 196, 160))
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if model.models.selected == .smart && !isDownloading {
+                Button {
+                    Haptics.light()
+                    model.models.select(.fast)
+                    if !model.models.isInstalled {
+                        model.models.download()
+                    }
+                } label: {
+                    Text("Stattdessen 1.5B schnell (etwa 1,0 GB)")
+                        .velaText(15.5, weight: .semibold)
+                        .foregroundStyle(Color.rgba(185, 160, 255))
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Lädt die kleinere KI. Eine schon gespeicherte 1.5B wird sofort verwendet.")
             }
 
             if AppleIntelligenceStatus.isAvailable {
@@ -120,7 +138,7 @@ struct ModelOnboardingView: View {
         .buttonStyle(.plain)
         .accessibilityHint(model.models.hasPartialDownload
             ? "Setzt den angefangenen Download fort."
-            : "Lädt etwa 1 GB. Ein Abbruch kann später fortgesetzt werden.")
+            : "Lädt etwa \(model.models.selected.sizeLabel). Ein Abbruch kann später fortgesetzt werden.")
     }
 
     private var progressBlock: some View {

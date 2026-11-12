@@ -179,7 +179,7 @@ struct SettingsView: View {
     private var footer: String {
         switch VelaEngineKind(rawValue: engine) ?? .local {
         case .local where model.models.isInstalled:
-            return "Vela · \(version) · Qwen 2.5 · offline"
+            return "Vela · \(version) · \(model.models.selected.displayName) · offline"
         case .apple where AppleIntelligenceStatus.isAvailable:
             return "Vela · \(version) · Apple Intelligence · offline"
         case .demo:
@@ -192,7 +192,7 @@ struct SettingsView: View {
     private var modelGroup: some View {
         VStack(alignment: .leading, spacing: 8) {
             SettingsGroup {
-                VoiceRow(title: "Lokal auf dem iPhone", subtitle: "Qwen 2.5 1.5B · 4-bit · offline",
+                VoiceRow(title: "Lokal auf dem iPhone", subtitle: "\(model.models.selected.displayName) · 4-bit · offline",
                          selected: engine == VelaEngineKind.local.rawValue) {
                     engine = VelaEngineKind.local.rawValue
                 }
@@ -209,8 +209,19 @@ struct SettingsView: View {
                 }
             }
             SettingsGroup {
+                ForEach(Array(VelaModelKind.allCases.enumerated()), id: \.element.id) { index, kind in
+                    if index > 0 {
+                        Divider().overlay(Color.white.opacity(0.07))
+                    }
+                    VoiceRow(title: kind.title, subtitle: model.models.statusLine(for: kind),
+                             selected: model.models.selected == kind) {
+                        model.models.select(kind)
+                    }
+                }
+            }
+            SettingsGroup {
                 VStack(alignment: .leading, spacing: 8) {
-                    RowLabel(icon: "cpu", title: "Qwen 2.5 1.5B", subtitle: model.models.detail)
+                    RowLabel(icon: "cpu", title: model.models.selected.title, subtitle: model.models.detail)
                     if case .downloading = model.models.phase {
                         ProgressView(value: model.models.fraction)
                             .tint(Theme.violet)
@@ -218,11 +229,11 @@ struct SettingsView: View {
                             .velaText(14, weight: .medium)
                             .foregroundStyle(Color.rgba(185, 160, 255))
                     } else if model.models.isInstalled {
-                        Button("Modell löschen") { model.models.delete() }
+                        Button("\(model.models.selected.title) löschen") { model.models.delete() }
                             .velaText(14, weight: .medium)
                             .foregroundStyle(Color.rgba(185, 160, 255))
                     } else {
-                        Button("KI-Modell laden") { model.models.download() }
+                        Button("\(model.models.selected.title) laden") { model.models.download() }
                             .velaText(15.5, weight: .semibold)
                             .foregroundStyle(Color.rgba(185, 160, 255))
                     }

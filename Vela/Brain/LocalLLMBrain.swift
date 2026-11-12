@@ -2,8 +2,8 @@
 //  LocalLLMBrain.swift
 //  Vela
 //
-//  On-device Qwen 2.5 1.5B (4-bit) through MLX. Tokens stream into the chat
-//  bubble; the caller speaks them sentence by sentence.
+//  On-device Qwen through MLX. Capable phones use Qwen3 4B with thinking
+//  disabled. Tokens stream into the chat bubble; the caller speaks them.
 //
 
 import Foundation
@@ -12,7 +12,7 @@ import MLXLMCommon
 
 @MainActor
 final class LocalLLMBrain: VelaBrain {
-    let displayName = "Qwen 2.5 1.5B"
+    var displayName: String { models.selected.displayName }
     let isOffline = true
 
     private let knowledge: LocalKnowledgeStore
@@ -32,22 +32,27 @@ final class LocalLLMBrain: VelaBrain {
         let prompt = VelaPrompt.user(question: question, history: history, passages: passages, facts: knowledge.facts)
         do {
             let container = try await models.container()
+            let context: [String: any Sendable]? = models.selected.disablesThinking
+                ? ["enable_thinking": false as any Sendable]
+                : nil
             let session = ChatSession(
                 container,
                 instructions: VelaPrompt.system,
-                generateParameters: GenerateParameters(maxTokens: 420, temperature: 0.6, repetitionPenalty: 1.05)
+                generateParameters: GenerateParameters(maxTokens: 420, temperature: 0.6, repetitionPenalty: 1.05),
+                additionalContext: context
             )
             var text = ""
             for try await chunk in session.streamResponse(to: prompt) {
                 text += chunk
-                onUpdate(text)
+                let visible = VelaPrompt.withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !visible.isEmpty { onUpdate(visible) }
             }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let visible = trimmed.isEmpty ? "Dazu kann ich gerade nichts Sicheres sagen." : trimmed
-            if trimmed.isEmpty { onUpdate(visible) }
+            let visible = VelaPrompt.withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
+            let shown = visible.isEmpty ? "Dazu kann ich gerade nichts Sicheres sagen." : visible
+            if visible.isEmpty { onUpdate(shown) }
             return VelaAnswer(
-                blocks: VelaPrompt.blocks(from: visible),
-                spoken: VelaPrompt.spoken(from: visible),
+                blocks: VelaPrompt.blocks(from: shown),
+                spoken: VelaPrompt.spoken(from: shown),
                 sources: passages.map(\.source),
                 isDemo: false
             )
