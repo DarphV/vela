@@ -488,7 +488,13 @@ def create_profile(team, cert_id, preferred_name):
     bundle = ensure_bundle_id(team)
     if not bundle:
         fail(f"Bundle ID {BUNDLE_ID} is not registered, so no App Store profile can be created.")
-    for name in (preferred_name, "Vela App Store CI"):
+    run = env("GITHUB_RUN_NUMBER").strip() or "ci"
+    names = []
+    for name in (preferred_name, f"Vela App Store {run}", f"Vela {run}"):
+        if name and name not in names:
+            names.append(name)
+    last = ""
+    for name in names:
         status, payload = api("POST", "/v1/profiles", {
             "data": {
                 "type": "profiles",
@@ -504,11 +510,16 @@ def create_profile(team, cert_id, preferred_name):
             if content:
                 install_profile(name, content)
                 return
-        detail = error_text(json.dumps(payload).encode())
-        if "already" not in detail.lower() and status != 409:
-            print(detail)
-            fail("Could not create the App Store provisioning profile.")
-    fail("Could not create the App Store provisioning profile.")
+            fail("App Store Connect created a profile but did not return its contents. Nothing was revoked.")
+        detail = error_text(json.dumps(payload).encode()) if status >= 400 else ""
+        print(f"Profile '{name}' was not created (HTTP {status}).")
+        if detail:
+            print(detail[:500])
+        last = detail
+        duplicate = status == 409 or "already" in detail.lower() or "duplicate" in detail.lower()
+        if not duplicate:
+            fail("Could not create the App Store provisioning profile. Nothing was revoked.")
+    fail("Could not create the App Store provisioning profile because those names are already used. Nothing was revoked.\n" + last[:400])
 
 
 def issue_app_store_signing(team):
