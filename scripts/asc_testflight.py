@@ -980,7 +980,10 @@ def follow_related(label, relationship):
     path = related
     if path.startswith(API):
         path = path[len(API):]
-    status, payload = api("GET", path + ("&limit=20" if "?" in path else "?limit=20"))
+    query = path + ("&limit=20" if "?" in path else "?limit=20")
+    status, payload = api("GET", query)
+    if status == 400 and "limit" in error_text(json.dumps(payload).encode()).lower():
+        status, payload = api("GET", path)
     count = len(payload.get("data") or []) if isinstance(payload.get("data"), list) else (1 if payload.get("data") else 0)
     print(f"{label} HTTP {status} count {count}")
     if status >= 400:
@@ -998,11 +1001,18 @@ def crash_reports():
     app = app_id()
     print(f"App {BUNDLE_ID} found.")
     status, app_payload = api("GET", f"/v1/apps/{app}")
+    app_relationships = {}
     if status < 400 and app_payload.get("data"):
-        relationship_names(app_payload["data"])
+        app_relationships = relationship_names(app_payload["data"])
+    submissions_from_app = []
+    for name in ("betaFeedbackCrashSubmissions", "betaFeedbackScreenshotSubmissions"):
+        found = follow_related(name, app_relationships.get(name))
+        submissions_from_app.extend(found)
+    if submissions_from_app:
+        print(f"Feedback records on the app: {len(submissions_from_app)}")
     builds = builds_for_version(app, "19")
     print(f"Build records with version 19: {len(builds)}")
-    submissions = []
+    submissions = list(submissions_from_app)
     for build in builds:
         build_id = build.get("id")
         print(f"Build {build_id} uploaded {((build.get('attributes') or {}).get('uploadedDate'))}")
