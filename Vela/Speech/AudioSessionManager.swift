@@ -2,9 +2,9 @@
 //  AudioSessionManager.swift
 //  Vela
 //
-//  One audio session for listening + speaking. `.allowAirPlay` and
-//  `.allowBluetoothA2DP` keep Vela's voice on AirPlay speakers (HomePod as
-//  AirPlay target), Bluetooth speakers and AirPods while the iPhone mic listens.
+//  One audio session for listening + speaking. voiceChat enables the system
+//  echo canceller so Vela can keep the mic open while she talks. AirPlay and
+//  Bluetooth HFP stay available for the route.
 //
 
 import AVFoundation
@@ -19,7 +19,7 @@ enum AudioSessionManager {
                 // voiceChat turns on echo cancellation so Vela can keep listening while she speaks.
                 try session.setCategory(.playAndRecord,
                                         mode: .voiceChat,
-                                        options: [.defaultToSpeaker, .allowAirPlay, .allowBluetooth])
+                                        options: [.defaultToSpeaker, .allowAirPlay, .allowBluetoothHFP])
                 configured = true
             }
             try session.setActive(true, options: [])

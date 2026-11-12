@@ -595,17 +595,17 @@ enum MenuBar {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "Vela"
         let menu = NSMenu()
-        menu.addItem(item("Jedes Mal fragen", #selector(MenuBridge.ask)))
-        menu.addItem(item("Für diese Sitzung erlauben", #selector(MenuBridge.session)))
-        menu.addItem(item("Immer erlauben", #selector(MenuBridge.always)))
+        menu.addItem(menuEntry("Jedes Mal fragen", #selector(MenuBridge.ask)))
+        menu.addItem(menuEntry("Für diese Sitzung erlauben", #selector(MenuBridge.session)))
+        menu.addItem(menuEntry("Immer erlauben", #selector(MenuBridge.always)))
         menu.addItem(.separator())
-        menu.addItem(item("Alles widerrufen", #selector(MenuBridge.revoke)))
-        menu.addItem(item("Protokoll anzeigen", #selector(MenuBridge.showLog)))
+        menu.addItem(menuEntry("Alles widerrufen", #selector(MenuBridge.revoke)))
+        menu.addItem(menuEntry("Protokoll anzeigen", #selector(MenuBridge.showLog)))
         item.menu = menu
         bridge.item = item
     }
 
-    private static func item(_ title: String, _ action: Selector) -> NSMenuItem {
+    private static func menuEntry(_ title: String, _ action: Selector) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
         entry.target = bridge
         return entry

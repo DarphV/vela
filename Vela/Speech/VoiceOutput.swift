@@ -39,9 +39,10 @@ final class VoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
         synthesizer.usesApplicationAudioSession = true
     }
 
-    var isSpeaking: Bool { synthesizer.isSpeaking || pending > 0 }
+    var isSpeaking: Bool { synthesizer.isSpeaking || pending > 0 || openWrites > 0 }
 
-    var hasPending: Bool { pending > 0 || synthesizer.isSpeaking }
+    /// Includes an in-flight `write` so the turn is not closed before the first buffer arrives.
+    var hasPending: Bool { pending > 0 || openWrites > 0 || synthesizer.isSpeaking }
 
     /// Real output level 0...1 from the PCM just handed to the player.
     var outputLevel: Float {
