@@ -48,6 +48,8 @@ struct RootView: View {
     /// After the splash, the orb sits at the top and the full-screen Metal view is gone.
     @State private var orbCompact = false
     @State private var metalRetired = false
+    /// The mini avatar fades in only once the splash shrink has finished.
+    @State private var avatarOpacity: Double = 0
 
     private var isChat: Bool { model.mode == .chat }
     private var modeAnimation: Animation {
@@ -144,7 +146,7 @@ struct RootView: View {
             guard !showing, !orbCompact else { return }
             if reduceMotion {
                 orbCompact = true
-                metalRetired = true
+                revealMiniAvatar()
                 return
             }
             withAnimation(.spring(response: 0.85, dampingFraction: 0.88)) {
@@ -152,7 +154,7 @@ struct RootView: View {
             }
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(920))
-                metalRetired = true
+                revealMiniAvatar()
             }
         }
         .onChange(of: reduceMotion, initial: true) { _, value in
@@ -212,11 +214,13 @@ struct RootView: View {
         let compact = isChat || orbCompact
         let side = compact ? StageLayout.avatarSize : L.stage
         let centerY = compact ? L.avatarCenter : L.centerY
-        return Group {
-            if metalRetired {
-                SoftOrb(design: design)
-            } else {
+        return ZStack {
+            if !metalRetired {
                 VelaVisual(driver: model.driver, preferredFPS: 30)
+            }
+            if orbCompact {
+                SkinAvatar(design: design)
+                    .opacity(avatarOpacity)
             }
         }
         .frame(width: side, height: side)
@@ -225,6 +229,17 @@ struct RootView: View {
         .opacity(stageOpacity)
         .allowsHitTesting(false)
         .animation(.spring(response: 0.85, dampingFraction: 0.88), value: compact)
+    }
+
+    /// Fades in the paused mini avatar, then removes the full-screen Metal view.
+    private func revealMiniAvatar() {
+        withAnimation(.easeIn(duration: 0.55)) {
+            avatarOpacity = 1
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(560))
+            metalRetired = true
+        }
     }
 
     /// Invisible tap target over the small orb in the chat. No stroke.

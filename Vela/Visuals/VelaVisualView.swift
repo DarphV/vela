@@ -41,10 +41,10 @@ struct VelaMetalView: UIViewRepresentable {
         view.colorPixelFormat = VelaGPU.pixelFormat
         view.framebufferOnly = true
         view.autoResizeDrawable = true
-        // Prototype caps the device pixel ratio at 2; saves a lot of GPU on 3x screens.
-        view.contentScaleFactor = 2
+        // Full-screen caps the device pixel ratio at 2. A paused mini avatar stays at 1.
+        view.contentScaleFactor = driver.isStatic ? 1 : 2
         view.isUserInteractionEnabled = false
-        view.preferredFramesPerSecond = driver.economy ? 24 : preferredFPS
+        view.preferredFramesPerSecond = driver.isStatic ? 2 : (driver.economy ? 24 : preferredFPS)
 
         if let gpu = VelaGPU.shared {
             let renderer = VelaRenderer(gpu: gpu, driver: driver)
@@ -61,7 +61,12 @@ struct VelaMetalView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
-        let economy = driver.economy && !driver.isStatic
+        if driver.isStatic {
+            if !view.isPaused { view.isPaused = true }
+            if view.contentScaleFactor != 1 { view.contentScaleFactor = 1 }
+            return
+        }
+        let economy = driver.economy
         let fps = economy ? 24 : preferredFPS
         if view.preferredFramesPerSecond != fps {
             view.preferredFramesPerSecond = fps
@@ -70,9 +75,6 @@ struct VelaMetalView: UIViewRepresentable {
             if view.contentScaleFactor != 1 { view.contentScaleFactor = 1 }
         } else if view.contentScaleFactor <= 1.01 {
             view.contentScaleFactor = 2
-        }
-        if driver.isStatic {
-            view.setNeedsDisplay()
         }
     }
 
@@ -83,30 +85,16 @@ struct VelaMetalView: UIViewRepresentable {
     }
 }
 
-/// Soft avatar after the splash. A gradient pulse, with the full-screen Metal view gone.
-struct SoftOrb: View {
+/// One paused frame of the real shader, used for the top avatar and the chat bubbles.
+/// Nebula, black hole and black hole nebula each keep their own picture.
+struct SkinAvatar: View {
     let design: Int
-    @State private var pulse = false
 
     var body: some View {
-        FallbackOrb(design: design)
-            .scaleEffect(pulse ? 1.05 : 0.94)
-            .opacity(pulse ? 0.95 : 0.72)
-            .shadow(color: glow.opacity(pulse ? 0.7 : 0.35), radius: pulse ? 18 : 8)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) {
-                    pulse = true
-                }
-            }
+        let skin = max(0, min(2, design))
+        VelaVisual(driver: VisualDriver.thumbnail(design: skin))
+            .id(skin)
             .accessibilityHidden(true)
-    }
-
-    private var glow: Color {
-        switch design {
-        case 1: return Color.rgba(255, 180, 90)
-        case 2: return Color.rgba(160, 120, 255)
-        default: return Color.rgba(120, 170, 255)
-        }
     }
 }
 
@@ -115,16 +103,19 @@ struct FallbackOrb: View {
     let design: Int
 
     var body: some View {
-        switch design {
-        case 1:
-            Circle().fill(RadialGradient(colors: [.black, .black, Color.rgba(255, 217, 160), Color.rgba(192, 96, 16), .black],
-                                         center: .center, startRadius: 0, endRadius: 160))
-        case 2:
-            Circle().fill(RadialGradient(colors: [.black, .black, Color.rgba(224, 192, 255), Color.rgba(112, 48, 255), Color.rgba(16, 160, 255), .black],
-                                         center: .center, startRadius: 0, endRadius: 160))
-        default:
-            Circle().fill(RadialGradient(colors: [Color.rgba(255, 208, 240), Color.rgba(160, 80, 255), Color.rgba(26, 160, 255), .black],
-                                         center: .center, startRadius: 0, endRadius: 160))
+        GeometryReader { geo in
+            let radius = max(geo.size.width, geo.size.height) * 0.5
+            switch design {
+            case 1:
+                Circle().fill(RadialGradient(colors: [.black, .black, Color.rgba(255, 217, 160), Color.rgba(192, 96, 16), .black],
+                                             center: .center, startRadius: radius * 0.08, endRadius: radius))
+            case 2:
+                Circle().fill(RadialGradient(colors: [.black, Color.rgba(90, 40, 180), Color.rgba(40, 170, 255), .black],
+                                             center: .center, startRadius: radius * 0.12, endRadius: radius))
+            default:
+                Circle().fill(RadialGradient(colors: [Color.rgba(255, 230, 250), Color.rgba(170, 80, 255), Color.rgba(30, 140, 255), Color.rgba(8, 6, 20)],
+                                             center: .center, startRadius: 0, endRadius: radius))
+            }
         }
     }
 }

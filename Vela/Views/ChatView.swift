@@ -236,39 +236,14 @@ private struct SourceChipButtonStyle: ButtonStyle {
     }
 }
 
-/// Small glowing nebula avatar next to bot messages (prototype: .mini).
+/// Same paused shader frame as the top avatar, for whichever skin is selected.
 struct MiniAvatar: View {
-    @State private var spin = false
+    @AppStorage(VelaSettings.designKey) private var design = 0
 
     var body: some View {
-        Circle()
-            .fill(RadialGradient(stops: [
-                .init(color: .white, location: 0),
-                .init(color: Color.rgba(255, 210, 244), location: 0.06),
-                .init(color: Color.rgba(255, 120, 220, 0.85), location: 0.14),
-                .init(color: Color.rgba(150, 80, 255, 0.75), location: 0.30),
-                .init(color: Color.rgba(40, 170, 255, 0.55), location: 0.52),
-                .init(color: Color.rgba(20, 10, 50, 0.9), location: 0.72),
-                .init(color: Color.rgba(5, 3, 12), location: 1)
-            ], center: UnitPoint(x: 0.5, y: 0.52), startRadius: 0, endRadius: 20))
-            .overlay(
-                Circle()
-                    .fill(AngularGradient(colors: [.clear, Color.rgba(80, 220, 255, 0.35), .clear, Color.rgba(200, 90, 255, 0.35), .clear],
-                                          center: .center))
-                    .blendMode(.screen)
-                    .rotationEffect(.degrees(spin ? 360 : 0))
-            )
-            .overlay(
-                Circle().fill(RadialGradient(colors: [Color.white.opacity(0.5), .clear],
-                                             center: UnitPoint(x: 0.32, y: 0.26), startRadius: 0, endRadius: 12))
-            )
-            .overlay(Circle().strokeBorder(Color.rgba(210, 180, 255, 0.5), lineWidth: 1))
-            .shadow(color: Color.rgba(150, 100, 255, 0.55), radius: 7)
+        SkinAvatar(design: design)
             .frame(width: 40, height: 40)
-            .onAppear {
-                withAnimation(.linear(duration: 9).repeatForever(autoreverses: false)) { spin = true }
-            }
-            .accessibilityHidden(true)
+            .clipShape(Circle())
     }
 }
 
