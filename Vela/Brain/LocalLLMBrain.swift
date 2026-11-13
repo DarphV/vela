@@ -18,6 +18,7 @@ final class LocalLLMBrain: VelaBrain {
 
     private let knowledge: LocalKnowledgeStore
     private let models: ModelStore
+    var olderSummary = ""
 
     init(knowledge: LocalKnowledgeStore, models: ModelStore) {
         self.knowledge = knowledge
@@ -33,6 +34,8 @@ final class LocalLLMBrain: VelaBrain {
         let facts = VelaPrompt.relevantFacts(question: question, from: knowledge.facts)
         let prompt = VelaPrompt.prompt(question: question, passages: passages, facts: facts)
         let prior = VelaPrompt.priorTurns(history: history, question: question)
+        let profile = knowledge.profileText()
+        let summary = olderSummary
         do {
             let container = try await models.container()
             let context: [String: any Sendable]? = models.selected.disablesThinking
@@ -46,7 +49,7 @@ final class LocalLLMBrain: VelaBrain {
                 }
                 let session = ChatSession(
                     container,
-                    instructions: VelaPrompt.system,
+                    instructions: VelaPrompt.instructions(profile: profile, summary: summary),
                     history: turns,
                     generateParameters: GenerateParameters(
                         maxTokens: 320,
@@ -86,5 +89,58 @@ final class LocalLLMBrain: VelaBrain {
             await onUpdate(message)
             return VelaAnswer(blocks: [.paragraph(message)], spoken: "Das lokale Modell konnte gerade nicht antworten.", sources: [], isDemo: false)
         }
+    }
+
+    /// Short background pass. The caller only starts it while speech and the microphone are idle.
+    func learnFacts(from message: String, known: [String], stop: LearnStop) async -> [FactDraft] {
+        guard !stop.isStopped else { return [] }
+        do {
+            let container = try await models.container()
+            let knownBlock = known.prefix(12).joined(separator: "\n")
+            let instructions = """
+            Du speicherst dauerhafte Fakten über die Person. Antworte nur mit einem JSON-Array, sonst nichts.
+            Höchstens 3 Objekte: {"category":"person|preference|project|routine|date|other","text":"..."}.
+            text auf Deutsch, dritte Person, ein kurzer Satz, zum Beispiel "Sam arbeitet an der App One Light".
+            Ignoriere Smalltalk, Fragen, Vermutungen und vorübergehende Zustände. Wenn nichts Dauerhaftes dasteht: [].
+            Schon bekannt, nicht wiederholen:
+            \(knownBlock)
+            """
+            let raw = try await Task.detached(priority: .utility) { () -> String in
+                if stop.isStopped { return "" }
+                MLXMemoryLimits.tightenForGeneration()
+                defer { MLXMemoryLimits.restoreCache() }
+                let session = ChatSession(
+                    container,
+                    instructions: instructions,
+                    generateParameters: GenerateParameters(maxTokens: 160, temperature: 0.2, topP: 0.9)
+                )
+                var text = ""
+                for try await chunk in session.streamResponse(to: message) {
+                    if stop.isStopped { return "" }
+                    text += chunk
+                }
+                return text
+            }.value
+            return FactDraft.parse(raw)
+        } catch {
+            return []
+        }
+    }
+}
+
+final class LearnStop: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+
+    func cancel() {
+        lock.lock()
+        stopped = true
+        lock.unlock()
+    }
+
+    var isStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
     }
 }

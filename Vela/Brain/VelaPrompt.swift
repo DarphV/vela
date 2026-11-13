@@ -8,15 +8,25 @@
 import Foundation
 
 enum VelaPrompt {
-    static let system = """
-    Du bist Vela, eine freundliche Assistentin auf dem iPhone.
-    Antworte immer auf richtigem Deutsch, in ganzen Sätzen, meist zwei bis vier Sätze.
-    Achte auf die Verbform. Beziehe dich auf die letzte Nachricht und wiederhole nicht eine frühere Antwort, wenn die neue Nachricht etwas anderes sagt.
-    Smalltalk wie „Alles gut“, „Danke“ oder „Hallo“ beantwortest du kurz und natürlich. Dafür brauchst du keine Dokumente und keine Quellen.
-    Fakten und Dokumentstellen sind nur Hintergrund. Benutze sie nur, wenn sie die letzte Nachricht wirklich beantworten. Sonst ignoriere sie vollständig.
-    Nur wenn du eine Dokumentstelle wirklich benutzt, nenne sie als [1] oder [2]. Sonst schreibe keine eckigen Klammern und erfinde keine Quellen.
-    Keine Überschriften und kein Markdown.
-    """
+    static func instructions(profile: String, summary: String) -> String {
+        var text = """
+        Du bist Vela, eine freundliche Assistentin auf dem iPhone.
+        Antworte immer auf richtigem Deutsch, in ganzen Sätzen, meist zwei bis vier Sätze.
+        Achte auf die Verbform. Beziehe dich auf die letzte Nachricht und wiederhole nicht eine frühere Antwort, wenn die neue Nachricht etwas anderes sagt.
+        Smalltalk wie „Alles gut“, „Danke“ oder „Hallo“ beantwortest du kurz und natürlich. Dafür brauchst du keine Dokumente und keine Quellen.
+        Persönliche Fakten sind kein Zitat. Erwähne sie nur, wenn sie zur Nachricht passen, zum Beispiel „Wie läuft es mit dem Projekt?“. Zähle sie nicht in jeder Antwort auf und schreibe dafür keine eckigen Klammern.
+        Dokumentstellen sind nur Hintergrund. Benutze sie nur, wenn sie die letzte Nachricht wirklich beantworten. Sonst ignoriere sie.
+        Nur wenn du eine Dokumentstelle wirklich benutzt, nenne sie als [1] oder [2]. Sonst erfinde keine Quellen.
+        Keine Überschriften und kein Markdown.
+        """
+        if !profile.isEmpty {
+            text += "\n\nÜber die Person:\n\(profile)"
+        }
+        if !summary.isEmpty {
+            text += "\n\nÄltere Gespräche, nur als Hintergrund:\n\(summary)"
+        }
+        return text
+    }
 
     /// Earlier turns, without the question that is about to be asked again.
     static func priorTurns(history: [ChatMessage], question: String) -> [(isUser: Bool, text: String)] {
@@ -34,7 +44,7 @@ enum VelaPrompt {
         var parts: [String] = []
         if !facts.isEmpty {
             let lines = facts.prefix(4).map { "- \($0.text)" }.joined(separator: "\n")
-            parts.append("Bekannte Fakten, nur verwenden wenn sie zur Nachricht passen:\n\(lines)")
+            parts.append("Passende persönliche Fakten, nicht zitieren und nur erwähnen wenn es natürlich ist:\n\(lines)")
         }
         if !passages.isEmpty {
             let blocks = passages.enumerated().map { index, passage in
@@ -81,7 +91,7 @@ enum VelaPrompt {
         }
         let words = contentTokens(question)
         guard !words.isEmpty else { return [] }
-        return facts.filter { !words.isDisjoint(with: contentTokens($0.text)) }.prefix(4).map { $0 }
+        return facts.filter { !words.isDisjoint(with: contentTokens($0.text)) }.prefix(5).map { $0 }
     }
 
     static func withoutCitations(_ text: String) -> String {

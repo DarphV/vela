@@ -23,6 +23,7 @@ struct SettingsView: View {
     @State private var macCode = ""
     @State private var pairingPeer: MacPeer?
     @State private var explainAlways = false
+    @State private var showMemory = false
 
     @State private var thumbnails: [VisualDriver] = VelaDesign.allCases.map { VisualDriver.thumbnail(design: $0.rawValue) }
     @State private var voices: [AVSpeechSynthesisVoice] = []
@@ -127,31 +128,29 @@ struct SettingsView: View {
                     .accessibilityLabel("Dokument hinzufügen")
                 }
 
-                if !model.knowledge.facts.isEmpty {
-                    SectionTitle("Gedächtnis")
-                    SettingsGroup {
-                        ForEach(model.knowledge.facts) { fact in
-                            HStack(alignment: .top, spacing: 12) {
-                                Text(fact.text)
-                                    .velaText(15)
-                                    .foregroundStyle(.white.opacity(0.9))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                Button {
-                                    model.knowledge.forgetFact(id: fact.id)
-                                } label: {
-                                    Image(systemName: "trash")
-                                        .velaText(14)
-                                        .foregroundStyle(.white.opacity(0.55))
-                                        .frame(width: 32, height: 32)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Fakt löschen")
+                SectionTitle("Gedächtnis")
+                SettingsGroup {
+                    Button { showMemory = true } label: {
+                        HStack(spacing: 12) {
+                            IconTile(icon: "person")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Was Vela über dich weiß")
+                                    .velaText(15.5)
+                                    .foregroundStyle(.white)
+                                Text(model.knowledge.facts.isEmpty ? "Noch nichts gemerkt" : "\(model.knowledge.facts.count) Fakten")
+                                    .velaText(12.5)
+                                    .foregroundStyle(.white.opacity(0.45))
                             }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
-                            Divider().overlay(Color.white.opacity(0.07))
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .velaText(13, weight: .semibold)
+                                .foregroundStyle(.white.opacity(0.35))
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                 }
 
                 Text(footer)
@@ -173,6 +172,10 @@ struct SettingsView: View {
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: ImportTypes.allowed, allowsMultipleSelection: false) { result in
             model.importFile(result)
+        }
+        .sheet(isPresented: $showMemory) {
+            MemorySettingsView()
+                .environmentObject(model)
         }
     }
 
@@ -579,5 +582,91 @@ private struct VoiceRow: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+struct MemorySettingsView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(VelaSettings.autoLearnKey) private var autoLearn = true
+    @State private var editing: MemoryFact?
+    @State private var draft = ""
+    @State private var confirmForget = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                SheetHeader(title: "Was Vela über dich weiß") { dismiss() }
+                SettingsGroup {
+                    Toggle(isOn: $autoLearn) {
+                        RowLabel(icon: "brain", title: "Automatisch lernen",
+                                 subtitle: "Nach einer Antwort, wenn nichts gesprochen wird")
+                    }
+                    .toggleStyle(VelaToggleStyle())
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+                }
+                if model.knowledge.facts.isEmpty {
+                    Text("Noch nichts gemerkt. Sag zum Beispiel „Ich heiße Sam“ oder erzähl von einem Projekt.")
+                        .velaText(15)
+                        .foregroundStyle(.white.opacity(0.55))
+                        .padding(.horizontal, 8)
+                        .padding(.top, 22)
+                } else {
+                    ForEach(FactCategory.allCases) { category in
+                        let rows = model.knowledge.facts.filter { $0.category == category }
+                        if !rows.isEmpty {
+                            SectionTitle(category.title)
+                            SettingsGroup {
+                                ForEach(rows) { fact in
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text(fact.text)
+                                            .velaText(15.5)
+                                            .foregroundStyle(.white)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        HStack(spacing: 16) {
+                                            Button("Ändern") {
+                                                editing = fact
+                                                draft = fact.text
+                                            }
+                                            Button("Löschen") { model.knowledge.forgetFact(id: fact.id) }
+                                        }
+                                        .velaText(14, weight: .medium)
+                                        .foregroundStyle(Color.rgba(185, 160, 255))
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 12)
+                                    Divider().overlay(Color.white.opacity(0.07))
+                                }
+                            }
+                        }
+                    }
+                    Button("Alles vergessen") { confirmForget = true }
+                        .velaText(15.5, weight: .semibold)
+                        .foregroundStyle(Color.rgba(255, 160, 150))
+                        .padding(.top, 22)
+                        .padding(.horizontal, 8)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 28)
+        }
+        .scrollIndicators(.hidden)
+        .velaSheetStyle()
+        .confirmationDialog("Alles vergessen?", isPresented: $confirmForget, titleVisibility: .visible) {
+            Button("Alles löschen", role: .destructive) { model.knowledge.forgetAllFacts() }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Vela vergisst die persönlichen Fakten. Dokumente bleiben.")
+        }
+        .alert("Fakt ändern", isPresented: Binding(get: { editing != nil }, set: { if !$0 { editing = nil } })) {
+            TextField("Fakt", text: $draft)
+            Button("Sichern") {
+                if let fact = editing { model.knowledge.updateFact(id: fact.id, text: draft) }
+                editing = nil
+            }
+            Button("Abbrechen", role: .cancel) { editing = nil }
+        }
     }
 }

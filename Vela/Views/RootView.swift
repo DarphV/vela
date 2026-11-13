@@ -305,21 +305,30 @@ struct RootView: View {
     private var toastView: some View {
         VStack {
             if let toast = model.toast {
-                Text(toast)
-                    .velaText(13.5)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.rgba(30, 26, 48, 0.8), in: Capsule())
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
-                    .shadow(color: .black.opacity(0.5), radius: 12, y: 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .padding(.top, 54)
+                Button {
+                    if model.toastCanUndo { model.undoLearnedToast() }
+                } label: {
+                    Text(toast)
+                        .velaText(13.5)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.rgba(30, 26, 48, 0.8), in: Capsule())
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.5), radius: 12, y: 8)
+                }
+                .buttonStyle(.plain)
+                .disabled(!model.toastCanUndo)
+                .accessibilityHint(model.toastCanUndo ? "Tippen macht das Merken rückgängig." : "")
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .padding(.top, 54)
+                .padding(.horizontal, 24)
             }
             Spacer()
         }
         .animation(.easeOut(duration: 0.3), value: model.toast)
-        .allowsHitTesting(false)
+        .allowsHitTesting(model.toastCanUndo)
     }
 
     // MARK: Design switch (prototype: fade out 330 ms, swap, fade in)

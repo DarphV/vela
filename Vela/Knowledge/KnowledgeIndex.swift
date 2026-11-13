@@ -30,6 +30,10 @@ struct StoredChunk {
 struct StoredFact {
     var id: String
     var text: String
+    var category: String
+    var created: Date
+    var updated: Date
+    var source: String
 }
 
 final class KnowledgeIndex {
@@ -69,6 +73,28 @@ final class KnowledgeIndex {
             created REAL NOT NULL
         );
         """)
+        try migrateFacts()
+    }
+
+    private func migrateFacts() throws {
+        let names = try columns(of: "facts")
+        if !names.contains("category") {
+            try exec("ALTER TABLE facts ADD COLUMN category TEXT NOT NULL DEFAULT 'other';")
+        }
+        if !names.contains("updated") {
+            try exec("ALTER TABLE facts ADD COLUMN updated REAL NOT NULL DEFAULT 0;")
+        }
+        if !names.contains("source") {
+            try exec("ALTER TABLE facts ADD COLUMN source TEXT NOT NULL DEFAULT '';")
+        }
+    }
+
+    private func columns(of table: String) throws -> Set<String> {
+        var names = Set<String>()
+        try query("PRAGMA table_info(\(table))", read: { statement in
+            names.insert(self.text(statement, 1))
+        })
+        return names
     }
 
     func documents() throws -> [StoredDocument] {
@@ -111,8 +137,17 @@ final class KnowledgeIndex {
 
     func facts() throws -> [StoredFact] {
         var rows: [StoredFact] = []
-        try query("SELECT id, text FROM facts ORDER BY created DESC", read: { statement in
-            rows.append(StoredFact(id: self.text(statement, 0), text: self.text(statement, 1)))
+        try query("SELECT id, text, category, created, updated, source FROM facts ORDER BY updated DESC", read: { statement in
+            let created = Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+            let updatedRaw = sqlite3_column_double(statement, 4)
+            rows.append(StoredFact(
+                id: self.text(statement, 0),
+                text: self.text(statement, 1),
+                category: self.text(statement, 2).isEmpty ? "other" : self.text(statement, 2),
+                created: created,
+                updated: updatedRaw > 0 ? Date(timeIntervalSince1970: updatedRaw) : created,
+                source: self.text(statement, 5)
+            ))
         })
         return rows
     }
@@ -160,11 +195,24 @@ final class KnowledgeIndex {
         return name
     }
 
-    func insertFact(id: String, text: String) throws {
-        try run("INSERT INTO facts (id, text, created) VALUES (?, ?, ?)") { statement in
+    func insertFact(id: String, text: String, category: String, source: String) throws {
+        let now = Date().timeIntervalSince1970
+        try run("INSERT INTO facts (id, text, created, category, updated, source) VALUES (?, ?, ?, ?, ?, ?)") { statement in
             self.bind(statement, 1, id)
             self.bind(statement, 2, text)
+            sqlite3_bind_double(statement, 3, now)
+            self.bind(statement, 4, category)
+            sqlite3_bind_double(statement, 5, now)
+            self.bind(statement, 6, source)
+        }
+    }
+
+    func updateFact(id: String, text: String, category: String) throws {
+        try run("UPDATE facts SET text = ?, category = ?, updated = ? WHERE id = ?") { statement in
+            self.bind(statement, 1, text)
+            self.bind(statement, 2, category)
             sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
+            self.bind(statement, 4, id)
         }
     }
 
@@ -172,6 +220,10 @@ final class KnowledgeIndex {
         try run("DELETE FROM facts WHERE id = ?") { statement in
             self.bind(statement, 1, id)
         }
+    }
+
+    func deleteAllFacts() throws {
+        try exec("DELETE FROM facts;")
     }
 
     private func query(_ sql: String, bind bindBlock: ((OpaquePointer) -> Void)? = nil, read: (OpaquePointer) -> Void) throws {

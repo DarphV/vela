@@ -15,9 +15,63 @@ struct KnowledgeDocument: Identifiable, Hashable {
     var chunkCount: Int
 }
 
+enum FactCategory: String, CaseIterable, Identifiable, Hashable {
+    case person, preference, project, routine, date, other
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .person: return "Person"
+        case .preference: return "Vorlieben"
+        case .project: return "Projekte"
+        case .routine: return "Alltag"
+        case .date: return "Termine"
+        case .other: return "Sonstiges"
+        }
+    }
+
+    static func parse(_ raw: String) -> FactCategory {
+        FactCategory(rawValue: raw.lowercased()) ?? .other
+    }
+}
+
+struct FactDraft: Hashable {
+    var category: FactCategory
+    var text: String
+
+    static func parse(_ raw: String) -> [FactDraft] {
+        var text = VelaPrompt.withoutThinking(raw)
+        text = text.replacingOccurrences(of: "```json", with: "").replacingOccurrences(of: "```", with: "")
+        guard let start = text.firstIndex(of: "["), let end = text.lastIndex(of: "]"), start <= end else { return [] }
+        let slice = String(text[start...end])
+        guard let data = slice.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([Row].self, from: data) else { return [] }
+        return rows.compactMap { row in
+            let body = row.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard body.count >= 8, body.count <= 180, !body.contains("?") else { return nil }
+            return FactDraft(category: FactCategory.parse(row.category), text: body)
+        }.prefix(3).map { $0 }
+    }
+
+    private struct Row: Decodable {
+        var category: String
+        var text: String
+    }
+}
+
 struct MemoryFact: Identifiable, Hashable {
     let id: String
-    let text: String
+    var text: String
+    var category: FactCategory
+    var updated: Date
+    var source: String
+}
+
+struct MemoryChange: Hashable {
+    var id: String
+    /// Nil when the change created a new fact. Undo then deletes it.
+    var previous: MemoryFact?
 }
 
 struct KnowledgePassage: Hashable {
@@ -37,8 +91,13 @@ protocol KnowledgeStore: AnyObject {
     func importDocument(at url: URL) async throws -> KnowledgeDocument
     func deleteDocument(id: String)
     func search(_ query: String, limit: Int) async -> [KnowledgePassage]
-    func rememberIfPersonal(_ text: String)
+    func rememberIfPersonal(_ text: String) -> MemoryChange?
+    func integrate(_ drafts: [FactDraft], source: String) -> [MemoryChange]
+    func updateFact(id: String, text: String)
     func forgetFact(id: String)
+    func forgetAllFacts()
+    func undo(_ change: MemoryChange)
+    func profileText() -> String
 }
 
 @MainActor
@@ -145,9 +204,10 @@ final class LocalKnowledgeStore: ObservableObject, KnowledgeStore {
         }
     }
 
-    func rememberIfPersonal(_ text: String) {
+    @discardableResult
+    func rememberIfPersonal(_ text: String) -> MemoryChange? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 8, trimmed.count <= 280 else { return }
+        guard trimmed.count >= 8, trimmed.count <= 280 else { return nil }
         let patterns = [
             #"(?i)\bmerke dir\b"#,
             #"(?i)\bich hei[sß]e\b"#,
@@ -158,16 +218,84 @@ final class LocalKnowledgeStore: ObservableObject, KnowledgeStore {
             #"(?i)\bich bin (?:der|die|ein|eine)\b"#,
             #"(?i)\bmein(?:e|en|er)? (?:beruf|job|firma|team|abteilung|name)\b"#
         ]
-        guard patterns.contains(where: { trimmed.range(of: $0, options: .regularExpression) != nil }) else { return }
-        if facts.contains(where: { $0.text.caseInsensitiveCompare(trimmed) == .orderedSame }) { return }
-        let id = UUID().uuidString
-        try? index.insertFact(id: id, text: trimmed)
+        guard patterns.contains(where: { trimmed.range(of: $0, options: .regularExpression) != nil }) else { return nil }
+        let category: FactCategory = trimmed.range(of: #"(?i)\b(hei[sß]e|name|wohne|arbeite|beruf|job|firma)\b"#, options: .regularExpression) != nil ? .person : .preference
+        return integrate([FactDraft(category: category, text: trimmed)], source: trimmed).first
+    }
+
+    /// Inserts new facts and replaces near-duplicates. Returns the changes a toast can undo.
+    func integrate(_ drafts: [FactDraft], source: String) -> [MemoryChange] {
+        var changes: [MemoryChange] = []
+        for draft in drafts {
+            let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.count >= 8, text.count <= 180, !text.contains("?") else { continue }
+            if let existing = facts.first(where: { nearDuplicate($0.text, text) }) {
+                guard existing.text.caseInsensitiveCompare(text) != .orderedSame else { continue }
+                let previous = existing
+                try? index.updateFact(id: existing.id, text: text, category: draft.category.rawValue)
+                changes.append(MemoryChange(id: existing.id, previous: previous))
+            } else {
+                let id = UUID().uuidString
+                try? index.insertFact(id: id, text: text, category: draft.category.rawValue, source: String(source.prefix(180)))
+                changes.append(MemoryChange(id: id, previous: nil))
+            }
+        }
+        if !changes.isEmpty { try? reload() }
+        return changes
+    }
+
+    func updateFact(id: String, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 3, let fact = facts.first(where: { $0.id == id }) else { return }
+        try? index.updateFact(id: id, text: trimmed, category: fact.category.rawValue)
         try? reload()
     }
 
     func forgetFact(id: String) {
         try? index.deleteFact(id: id)
         try? reload()
+    }
+
+    func forgetAllFacts() {
+        try? index.deleteAllFacts()
+        try? reload()
+    }
+
+    func undo(_ change: MemoryChange) {
+        if let previous = change.previous {
+            try? index.updateFact(id: previous.id, text: previous.text, category: previous.category.rawValue)
+        } else {
+            try? index.deleteFact(id: change.id)
+        }
+        try? reload()
+    }
+
+    func profileText() -> String {
+        let people = facts.filter { $0.category == .person }
+        let rest = facts.filter { $0.category != .person }
+        var lines: [String] = []
+        var count = 0
+        for fact in people + rest {
+            if lines.count >= 8 || count + fact.text.count > 500 { break }
+            lines.append(fact.text)
+            count += fact.text.count
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func nearDuplicate(_ left: String, _ right: String) -> Bool {
+        let a = VelaPrompt.contentTokens(left)
+        let b = VelaPrompt.contentTokens(right)
+        let union = a.union(b)
+        if !union.isEmpty {
+            let overlap = Float(a.intersection(b).count) / Float(union.count)
+            if overlap >= 0.55 { return true }
+        }
+        let leftVector = Embedder.vector(for: left)
+        let rightVector = Embedder.vector(for: right)
+        guard !leftVector.isEmpty, leftVector.count == rightVector.count else { return false }
+        let cosine = zip(leftVector, rightVector).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+        return cosine >= 0.86
     }
 
     private func reload() throws {
@@ -177,7 +305,9 @@ final class LocalKnowledgeStore: ObservableObject, KnowledgeStore {
             return KnowledgeDocument(id: $0.id, name: $0.name, detail: "\($0.chunkCount) Abschnitte\(pages)", chunkCount: $0.chunkCount)
         }
         let storedFacts = try index.facts()
-        facts = storedFacts.map { MemoryFact(id: $0.id, text: $0.text) }
+        facts = storedFacts.map {
+            MemoryFact(id: $0.id, text: $0.text, category: FactCategory.parse($0.category), updated: $0.updated, source: $0.source)
+        }
         chunkCache = try index.chunks()
         memoryCount = facts.count + chunkCache.count
     }

@@ -47,6 +47,7 @@ final class AppleIntelligenceBrain: VelaBrain {
     let displayName = "Apple Intelligence"
     let isOffline = true
     private let knowledge: LocalKnowledgeStore
+    var olderSummary = ""
 
     init(knowledge: LocalKnowledgeStore) {
         self.knowledge = knowledge
@@ -59,11 +60,12 @@ final class AppleIntelligenceBrain: VelaBrain {
     func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) async -> Void) async -> VelaAnswer {
         let passages = VelaPrompt.isSmallTalk(question) ? [] : await knowledge.search(question, limit: 3)
         let facts = VelaPrompt.relevantFacts(question: question, from: knowledge.facts)
+        let instructions = VelaPrompt.instructions(profile: knowledge.profileText(), summary: olderSummary)
         let prompt = VelaPrompt.user(question: question, history: history, passages: passages, facts: facts)
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *), AppleIntelligenceStatus.isAvailable {
             do {
-                let text = try await AppleStream.generate(prompt: prompt, onUpdate: onUpdate)
+                let text = try await AppleStream.generate(instructions: instructions, prompt: prompt, onUpdate: onUpdate)
                 let visible = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 let cleaned = passages.isEmpty ? VelaPrompt.withoutCitations(visible) : visible
                 let shown = cleaned.isEmpty ? "Dazu kann ich gerade nichts Sicheres sagen." : cleaned
@@ -85,8 +87,8 @@ final class AppleIntelligenceBrain: VelaBrain {
 #if canImport(FoundationModels)
 @available(iOS 26.0, *)
 private enum AppleStream {
-    static func generate(prompt: String, onUpdate: @MainActor (String) async -> Void) async throws -> String {
-        let session = LanguageModelSession(instructions: VelaPrompt.system)
+    static func generate(instructions: String, prompt: String, onUpdate: @MainActor (String) async -> Void) async throws -> String {
+        let session = LanguageModelSession(instructions: instructions)
         let stream = session.streamResponse(to: prompt)
         var latest = ""
         for try await partial in stream {

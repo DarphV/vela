@@ -24,6 +24,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var subline = "Sprachmodus"
     @Published private(set) var micEnabled = true
     @Published private(set) var toast: String?
+    @Published private(set) var toastCanUndo = false
     @Published private(set) var showSplash = true
     @Published private(set) var showOnboarding = false
     @Published var openSource: VelaSource?
@@ -50,6 +51,11 @@ final class AppModel: ObservableObject {
     private var replyToken = 0
     private var replyFinished = false
     private var suggestedSmallerModel = false
+    private var conversationSummary = ""
+    private var learnTask: Task<Void, Never>?
+    private var learnStop = LearnStop()
+    private var toastUndo: MemoryChange?
+    private var lastUserLine = ""
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
@@ -58,7 +64,13 @@ final class AppModel: ObservableObject {
         knowledge = store
         self.models = models
         brain = VelaEngine(knowledge: store, models: models)
-        messages = DemoBrain.welcomeExchange()
+        if ScreenshotLaunch.kind == nil, let saved = ConversationLog.load() {
+            messages = saved.messages
+            conversationSummary = saved.summary
+            brain.olderSummary = saved.summary
+        } else {
+            messages = DemoBrain.welcomeExchange()
+        }
 
         driver.design = VelaSettings.design
         driver.state = state
@@ -143,13 +155,25 @@ final class AppModel: ObservableObject {
     }
 
     func showToast(_ text: String, seconds: Double = 2.4) {
+        toastUndo = nil
+        toastCanUndo = false
         toast = text
         toastTask?.cancel()
         toastTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             self?.toast = nil
+            self?.toastCanUndo = false
         }
+    }
+
+    func undoLearnedToast() {
+        if let change = toastUndo {
+            knowledge.undo(change)
+        }
+        toast = nil
+        toastCanUndo = false
+        toastUndo = nil
     }
 
     private func refreshPowerBudget() {
@@ -302,6 +326,8 @@ final class AppModel: ObservableObject {
     }
 
     private func startListening(duringSpeech: Bool = false) {
+        learnStop.cancel()
+        learnTask?.cancel()
         guard mode == .voice, !showSplash, !showOnboarding, !showSettings, permission == .granted else { return }
         guard micEnabled else {
             if !duringSpeech {
@@ -431,6 +457,10 @@ final class AppModel: ObservableObject {
     private func ask(_ question: String, fromVoice: Bool) async {
         replyToken += 1
         let token = replyToken
+        learnStop.cancel()
+        let pendingLearn = learnTask
+        learnTask = nil
+        await pendingLearn?.value
         // Glas-Chat with Vorlesen off must not touch TTS, the audio session, or the engine.
         let speak = fromVoice || VelaSettings.ttsEnabled
         if speak {
@@ -439,7 +469,11 @@ final class AppModel: ObservableObject {
         }
         spokenPrefix = ""
         replyFinished = false
-        knowledge.rememberIfPersonal(question)
+        lastUserLine = question
+        if let change = knowledge.rememberIfPersonal(question), mode == .chat,
+           let fact = knowledge.facts.first(where: { $0.id == change.id }) {
+            showLearned(fact, change: change)
+        }
         messages.append(.user(question))
         if !fromVoice {
             try? await Task.sleep(for: .milliseconds(250))
@@ -447,6 +481,7 @@ final class AppModel: ObservableObject {
         }
         setState(.thinking)
         refreshPowerBudget()
+        brain.olderSummary = conversationSummary
         var messageID: UUID?
         let answer = await brain.streamAnswer(to: question, history: messages) { [weak self] text in
             guard let self, token == self.replyToken else { return }
@@ -478,8 +513,67 @@ final class AppModel: ObservableObject {
             await feedSpeech(VelaPrompt.joined(answer), flush: true)
         }
         replyFinished = true
+        rememberConversation()
         if !VelaSettings.ttsEnabled || !voice.hasPending {
             speechFinished(cancelled: false)
+        }
+        scheduleLearning(of: question, token: token)
+    }
+
+    private func rememberConversation() {
+        guard ScreenshotLaunch.kind == nil else { return }
+        if messages.count > 24 {
+            let dropped = messages.prefix(messages.count - 16)
+            let topics = dropped.filter { $0.role == .user }.prefix(4).map { String($0.text.prefix(60)) }
+            if !topics.isEmpty {
+                let line = "Früher: " + topics.joined(separator: "; ")
+                conversationSummary = String((conversationSummary + " " + line).suffix(500)).trimmingCharacters(in: .whitespaces)
+                brain.olderSummary = conversationSummary
+            }
+            messages = Array(messages.suffix(16))
+        }
+        ConversationLog.save(messages: messages, summary: conversationSummary)
+    }
+
+    private var canLearn: Bool {
+        !voice.isSpeaking && !voice.hasPending && !listener.isRunning && state != .thinking && state != .speaking
+    }
+
+    private func scheduleLearning(of question: String, token: Int) {
+        learnTask?.cancel()
+        guard VelaSettings.autoLearn, !VelaPrompt.isSmallTalk(question), VelaSettings.engine == .local else { return }
+        let stop = LearnStop()
+        learnStop = stop
+        learnTask = Task { [weak self] in
+            for _ in 0..<40 {
+                try? await Task.sleep(for: .milliseconds(400))
+                guard !Task.isCancelled, let self, self.replyToken == token, !stop.isStopped else { return }
+                if self.canLearn { break }
+            }
+            guard let self, !Task.isCancelled, self.replyToken == token, self.canLearn, !stop.isStopped else { return }
+            self.driver.heavyWork = true
+            let drafts = await self.brain.learnFacts(from: question, known: self.knowledge.facts.map(\.text), stop: stop)
+            self.driver.heavyWork = false
+            guard !Task.isCancelled else { return }
+            guard self.replyToken == token, self.canLearn, !stop.isStopped else { return }
+            let changes = self.knowledge.integrate(drafts, source: question)
+            if self.mode == .chat, let change = changes.first, let fact = self.knowledge.facts.first(where: { $0.id == change.id }) {
+                self.showLearned(fact, change: change)
+            }
+        }
+    }
+
+    private func showLearned(_ fact: MemoryFact, change: MemoryChange) {
+        toastUndo = change
+        toastCanUndo = true
+        toast = "Gemerkt: \(fact.text)"
+        toastTask?.cancel()
+        toastTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled else { return }
+            self?.toast = nil
+            self?.toastCanUndo = false
+            self?.toastUndo = nil
         }
     }
 
@@ -601,6 +695,7 @@ final class AppModel: ObservableObject {
         mode = .chat
         driver.mode = .chat
         if state != .thinking { setState(.idle) }
+        scheduleLearning(of: lastUserLine, token: replyToken)
     }
 
     func toVoice() {

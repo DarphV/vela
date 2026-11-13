@@ -21,6 +21,12 @@ final class VelaEngine: VelaBrain {
     let apple: AppleIntelligenceBrain
     private let models: ModelStore
     var performMac: ((MacAction) async -> String)?
+    var olderSummary = "" {
+        didSet {
+            local.olderSummary = olderSummary
+            apple.olderSummary = olderSummary
+        }
+    }
 
     init(knowledge: LocalKnowledgeStore, models: ModelStore) {
         self.models = models
@@ -91,6 +97,11 @@ final class VelaEngine: VelaBrain {
         let hinted = withHint(answer)
         await onUpdate(VelaPrompt.joined(hinted))
         return hinted
+    }
+
+    func learnFacts(from message: String, known: [String], stop: LearnStop) async -> [FactDraft] {
+        guard resolved == .local, !models.safeMode else { return [] }
+        return await local.learnFacts(from: message, known: known, stop: stop)
     }
 
     private func withModelNotice(_ answer: VelaAnswer) -> VelaAnswer {
