@@ -431,8 +431,12 @@ final class AppModel: ObservableObject {
     private func ask(_ question: String, fromVoice: Bool) async {
         replyToken += 1
         let token = replyToken
-        voice.stop()
-        stopListening()
+        // Glas-Chat with Vorlesen off must not touch TTS, the audio session, or the engine.
+        let speak = fromVoice || VelaSettings.ttsEnabled
+        if speak {
+            voice.stop()
+            stopListening()
+        }
         spokenPrefix = ""
         replyFinished = false
         knowledge.rememberIfPersonal(question)
@@ -452,12 +456,13 @@ final class AppModel: ObservableObject {
                 message.text = text
                 messageID = message.id
                 self.messages.append(message)
-                self.setState(.speaking)
             } else if let id = messageID, let index = self.messages.firstIndex(where: { $0.id == id }) {
                 self.messages[index].text = text
                 self.messages[index].answer = VelaAnswer(blocks: [.paragraph(text)], spoken: text, sources: [], isDemo: false)
             }
             self.streamRevision += 1
+            guard VelaSettings.ttsEnabled else { return }
+            self.setState(.speaking)
             await self.feedSpeech(text, flush: false)
         }
         guard token == replyToken else { return }
@@ -469,15 +474,17 @@ final class AppModel: ObservableObject {
             messages.append(.assistant(answer))
         }
         streamRevision += 1
-        await feedSpeech(VelaPrompt.joined(answer), flush: true)
+        if VelaSettings.ttsEnabled {
+            await feedSpeech(VelaPrompt.joined(answer), flush: true)
+        }
         replyFinished = true
         if !VelaSettings.ttsEnabled || !voice.hasPending {
             speechFinished(cancelled: false)
         }
     }
 
-    /// Speaks one finished sentence at a time. Synthesis finishes before the next
-    /// sentence is generated, and the microphone stays off while the buffers play.
+    /// Speaks one finished sentence at a time, in voice mode and in Glas-Chat.
+    /// Returns immediately when Vorlesen is off, before any audio object is touched.
     private func feedSpeech(_ full: String, flush: Bool) async {
         guard VelaSettings.ttsEnabled else { return }
         let token = replyToken
