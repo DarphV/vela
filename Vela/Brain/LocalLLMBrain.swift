@@ -29,8 +29,10 @@ final class LocalLLMBrain: VelaBrain {
     }
 
     func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) async -> Void) async -> VelaAnswer {
-        let passages = await knowledge.search(question, limit: 4)
-        let prompt = VelaPrompt.user(question: question, history: history, passages: passages, facts: knowledge.facts)
+        let passages = VelaPrompt.isSmallTalk(question) ? [] : await knowledge.search(question, limit: 3)
+        let facts = VelaPrompt.relevantFacts(question: question, from: knowledge.facts)
+        let prompt = VelaPrompt.prompt(question: question, passages: passages, facts: facts)
+        let prior = VelaPrompt.priorTurns(history: history, question: question)
         do {
             let container = try await models.container()
             let context: [String: any Sendable]? = models.selected.disablesThinking
@@ -39,16 +41,28 @@ final class LocalLLMBrain: VelaBrain {
             let text = try await Task.detached(priority: .utility) {
                 MLXMemoryLimits.tightenForGeneration()
                 defer { MLXMemoryLimits.restoreCache() }
+                let turns = prior.map {
+                    Chat.Message(role: $0.isUser ? .user : .assistant, content: $0.text)
+                }
                 let session = ChatSession(
                     container,
                     instructions: VelaPrompt.system,
-                    generateParameters: GenerateParameters(maxTokens: 420, temperature: 0.6, repetitionPenalty: 1.05),
+                    history: turns,
+                    generateParameters: GenerateParameters(
+                        maxTokens: 320,
+                        temperature: 0.7,
+                        topP: 0.9,
+                        repetitionPenalty: 1.1,
+                        repetitionContextSize: 64
+                    ),
                     additionalContext: context
                 )
+                let hideCitations = passages.isEmpty
                 var text = ""
                 for try await chunk in session.streamResponse(to: prompt) {
                     text += chunk
-                    let visible = VelaPrompt.withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
+                    var visible = VelaPrompt.withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if hideCitations { visible = VelaPrompt.withoutCitations(visible) }
                     if !visible.isEmpty {
                         await onUpdate(visible)
                     }
@@ -58,7 +72,8 @@ final class LocalLLMBrain: VelaBrain {
                 return text
             }.value
             let visible = VelaPrompt.withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
-            let shown = visible.isEmpty ? "Dazu kann ich gerade nichts Sicheres sagen." : visible
+            let cleaned = passages.isEmpty ? VelaPrompt.withoutCitations(visible) : visible
+            let shown = cleaned.isEmpty ? "Dazu kann ich gerade nichts Sicheres sagen." : cleaned
             if visible.isEmpty { await onUpdate(shown) }
             return VelaAnswer(
                 blocks: VelaPrompt.blocks(from: shown),

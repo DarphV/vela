@@ -119,21 +119,25 @@ final class LocalKnowledgeStore: ObservableObject, KnowledgeStore {
     }
 
     func search(_ query: String, limit: Int) async -> [KnowledgePassage] {
-        let tokens = Self.tokens(query)
-        guard !tokens.isEmpty, !chunkCache.isEmpty else { return [] }
+        if VelaPrompt.isSmallTalk(query) { return [] }
+        let queryWords = VelaPrompt.contentTokens(query)
+        guard !queryWords.isEmpty, !chunkCache.isEmpty else { return [] }
         let queryVector = Embedder.vector(for: query)
         let useVectors = !queryVector.isEmpty && chunkCache.contains { !$0.embedding.isEmpty && $0.embedding.count == queryVector.count }
-        let keywordScores = bm25(queryTokens: tokens)
 
         var ranked: [(StoredChunk, Float)] = []
         for chunk in chunkCache {
-            let keyword = keywordScores[chunk.id] ?? 0
-            var score = keyword
+            let shared = queryWords.intersection(VelaPrompt.contentTokens(chunk.text))
+            let strong = shared.filter { $0.count >= 5 }
+            var cosine: Float = 0
             if useVectors, chunk.embedding.count == queryVector.count {
-                let cosine = zip(queryVector, chunk.embedding).reduce(Float(0)) { $0 + $1.0 * $1.1 }
-                score = cosine * 0.75 + keyword * 0.25
+                cosine = zip(queryVector, chunk.embedding).reduce(Float(0)) { $0 + $1.0 * $1.1 }
             }
-            if score > 0.01 { ranked.append((chunk, score)) }
+            // Two leftover chunks used to pass on any tiny cosine. A hit now needs a real word or a close vector.
+            let matches = cosine >= 0.8 || strong.count >= 2 || (!strong.isEmpty && cosine >= 0.62)
+            guard matches else { continue }
+            let score = max(cosine, Float(strong.count) * 0.25)
+            ranked.append((chunk, score))
         }
         ranked.sort { $0.1 > $1.1 }
         return ranked.prefix(max(1, limit)).map { chunk, score in
@@ -191,37 +195,6 @@ final class LocalKnowledgeStore: ObservableObject, KnowledgeStore {
             fileURL: VelaPaths.documents.appendingPathComponent(chunk.filename),
             page: isPDF ? chunk.page : nil
         )
-    }
-
-    private func bm25(queryTokens: [String]) -> [String: Float] {
-        let k1: Float = 1.2
-        let b: Float = 0.75
-        let docs = chunkCache.map { (id: $0.id, tokens: Self.tokens($0.text)) }
-        let average = Float(docs.map(\.tokens.count).reduce(0, +)) / Float(max(1, docs.count))
-        var documentFrequency: [String: Int] = [:]
-        for doc in docs {
-            for term in Set(doc.tokens) { documentFrequency[term, default: 0] += 1 }
-        }
-        let n = Float(docs.count)
-        var scores: [String: Float] = [:]
-        for doc in docs {
-            var frequencies: [String: Int] = [:]
-            for token in doc.tokens { frequencies[token, default: 0] += 1 }
-            var score: Float = 0
-            let length = Float(doc.tokens.count)
-            for term in Set(queryTokens) {
-                let freq = Float(frequencies[term] ?? 0)
-                guard freq > 0 else { continue }
-                let df = Float(documentFrequency[term] ?? 0)
-                let idf = log(1 + (n - df + 0.5) / (df + 0.5))
-                let denom = freq + k1 * (1 - b + b * length / max(average, 1))
-                score += idf * (freq * (k1 + 1)) / denom
-            }
-            scores[doc.id] = score
-        }
-        let peak = scores.values.max() ?? 1
-        guard peak > 0 else { return scores }
-        return scores.mapValues { $0 / peak }
     }
 
     private static func tokens(_ text: String) -> [String] {

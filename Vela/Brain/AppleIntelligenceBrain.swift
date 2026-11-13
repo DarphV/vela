@@ -57,14 +57,16 @@ final class AppleIntelligenceBrain: VelaBrain {
     }
 
     func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) async -> Void) async -> VelaAnswer {
-        let passages = await knowledge.search(question, limit: 4)
-        let prompt = VelaPrompt.user(question: question, history: history, passages: passages, facts: knowledge.facts)
+        let passages = VelaPrompt.isSmallTalk(question) ? [] : await knowledge.search(question, limit: 3)
+        let facts = VelaPrompt.relevantFacts(question: question, from: knowledge.facts)
+        let prompt = VelaPrompt.user(question: question, history: history, passages: passages, facts: facts)
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *), AppleIntelligenceStatus.isAvailable {
             do {
                 let text = try await AppleStream.generate(prompt: prompt, onUpdate: onUpdate)
                 let visible = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                let shown = visible.isEmpty ? "Dazu kann ich gerade nichts Sicheres sagen." : visible
+                let cleaned = passages.isEmpty ? VelaPrompt.withoutCitations(visible) : visible
+                let shown = cleaned.isEmpty ? "Dazu kann ich gerade nichts Sicheres sagen." : cleaned
                 if visible.isEmpty { await onUpdate(shown) }
                 return VelaAnswer(blocks: VelaPrompt.blocks(from: shown), spoken: VelaPrompt.spoken(from: shown), sources: passages.map(\.source), isDemo: false)
             } catch {

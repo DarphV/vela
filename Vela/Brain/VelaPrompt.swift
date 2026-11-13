@@ -9,38 +9,102 @@ import Foundation
 
 enum VelaPrompt {
     static let system = """
-    Du bist Vela, eine freundliche und präzise Assistentin.
-    Antworte immer auf Deutsch, auch wenn die Frage in einer anderen Sprache gestellt wird.
-    Sei knapp: meist zwei bis vier Sätze. Nur wenn ausdrücklich mehr verlangt wird, antworte ausführlicher.
-    Wenn Dokumentstellen mitgeliefert sind und die Frage daraus beantwortbar ist, stütze dich nur auf sie und nenne die Quelle im Satz als [1], [2] und so weiter.
-    Erfinde keine Stellen, Seitenzahlen oder Zitate. Wenn die Dokumente die Frage nicht hergeben oder du unsicher bist, sag das in einem Satz.
-    Nutze bekannte Fakten über die Person nur, wenn sie zur Frage passen.
+    Du bist Vela, eine freundliche Assistentin auf dem iPhone.
+    Antworte immer auf richtigem Deutsch, in ganzen Sätzen, meist zwei bis vier Sätze.
+    Achte auf die Verbform. Beziehe dich auf die letzte Nachricht und wiederhole nicht eine frühere Antwort, wenn die neue Nachricht etwas anderes sagt.
+    Smalltalk wie „Alles gut“, „Danke“ oder „Hallo“ beantwortest du kurz und natürlich. Dafür brauchst du keine Dokumente und keine Quellen.
+    Fakten und Dokumentstellen sind nur Hintergrund. Benutze sie nur, wenn sie die letzte Nachricht wirklich beantworten. Sonst ignoriere sie vollständig.
+    Nur wenn du eine Dokumentstelle wirklich benutzt, nenne sie als [1] oder [2]. Sonst schreibe keine eckigen Klammern und erfinde keine Quellen.
     Keine Überschriften und kein Markdown.
     """
 
-    static func user(question: String, history: [ChatMessage], passages: [KnowledgePassage], facts: [MemoryFact]) -> String {
+    /// Earlier turns, without the question that is about to be asked again.
+    static func priorTurns(history: [ChatMessage], question: String) -> [(isUser: Bool, text: String)] {
+        var turns = Array(history.suffix(8))
+        let asked = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let last = turns.last, last.role == .user,
+           last.text.trimmingCharacters(in: .whitespacesAndNewlines) == asked {
+            turns.removeLast()
+        }
+        return turns.suffix(6).map { (isUser: $0.role == .user, text: String($0.text.prefix(500))) }
+    }
+
+    /// The new user turn. History stays outside this string so the chat template can keep the roles.
+    static func prompt(question: String, passages: [KnowledgePassage], facts: [MemoryFact]) -> String {
         var parts: [String] = []
         if !facts.isEmpty {
-            let lines = facts.prefix(12).map { "- \($0.text)" }.joined(separator: "\n")
-            parts.append("Bekannte Fakten über die Person:\n\(lines)")
-        }
-        let recent = history.suffix(6).map { message -> String in
-            let who = message.role == .user ? "Person" : "Vela"
-            return "\(who): \(message.text.prefix(400))"
-        }
-        if !recent.isEmpty {
-            parts.append("Bisheriges Gespräch:\n" + recent.joined(separator: "\n"))
+            let lines = facts.prefix(4).map { "- \($0.text)" }.joined(separator: "\n")
+            parts.append("Bekannte Fakten, nur verwenden wenn sie zur Nachricht passen:\n\(lines)")
         }
         if !passages.isEmpty {
             let blocks = passages.enumerated().map { index, passage in
-                let body = String(passage.text.prefix(700))
+                let body = String(passage.text.prefix(500))
                 return "[\(index + 1)] \(passage.source.document), \(passage.source.location)\n\(body)"
             }.joined(separator: "\n\n")
-            parts.append("Dokumentstellen:\n\(blocks)")
+            parts.append("Dokumentstellen, nur verwenden wenn sie die Nachricht wirklich beantworten:\n\(blocks)")
         }
-        parts.append("Frage:\n\(question)")
+        parts.append(question)
         return parts.joined(separator: "\n\n")
     }
+
+    static func user(question: String, history: [ChatMessage], passages: [KnowledgePassage], facts: [MemoryFact]) -> String {
+        var parts: [String] = []
+        let prior = priorTurns(history: history, question: question)
+        if !prior.isEmpty {
+            let lines = prior.map { ($0.isUser ? "Person" : "Vela") + ": \($0.text)" }.joined(separator: "\n")
+            parts.append("Bisheriges Gespräch:\n\(lines)")
+        }
+        parts.append(prompt(question: question, passages: passages, facts: facts))
+        return parts.joined(separator: "\n\n")
+    }
+
+    static func isSmallTalk(_ text: String) -> Bool {
+        var folded = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        folded = folded.folding(options: .diacriticInsensitive, locale: Locale(identifier: "de_DE"))
+        folded = folded.replacingOccurrences(of: "’", with: "").replacingOccurrences(of: "'", with: "")
+        let phrases: Set<String> = [
+            "hallo", "hi", "hey", "moin", "servus", "guten tag", "guten morgen", "guten abend", "gute nacht",
+            "danke", "dankeschoen", "vielen dank", "bitte", "ok", "okay", "alles gut", "alles klar", "passt",
+            "super", "prima", "cool", "genau", "ja", "nein", "mhm", "wie gehts", "wie geht es dir",
+            "mir gehts gut", "gut", "tschuess", "bis dann", "bis bald", "verstanden", "schon gut",
+            "kein problem", "na gut", "in ordnung", "alles beste"
+        ]
+        if phrases.contains(folded) { return true }
+        return folded.count <= 28 && contentTokens(folded).isEmpty
+    }
+
+    /// Facts are kept only when the person asks about themselves or the words overlap.
+    static func relevantFacts(question: String, from facts: [MemoryFact]) -> [MemoryFact] {
+        guard !facts.isEmpty, !isSmallTalk(question) else { return [] }
+        if question.range(of: #"(?i)\b(über mich|mein name|wer bin ich|erinnerst du|was weißt du|was weisst du)\b"#, options: .regularExpression) != nil {
+            return Array(facts.prefix(6))
+        }
+        let words = contentTokens(question)
+        guard !words.isEmpty else { return [] }
+        return facts.filter { !words.isDisjoint(with: contentTokens($0.text)) }.prefix(4).map { $0 }
+    }
+
+    static func withoutCitations(_ text: String) -> String {
+        var result = text.replacingOccurrences(of: #"\s*\[\d+\]"#, with: "", options: .regularExpression)
+        while result.contains("  ") { result = result.replacingOccurrences(of: "  ", with: " ") }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func contentTokens(_ text: String) -> Set<String> {
+        let words = text.lowercased().folding(options: .diacriticInsensitive, locale: Locale(identifier: "de_DE"))
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+        return Set(words.filter { $0.count >= 4 && !stopwords.contains($0) })
+    }
+
+    private static let stopwords: Set<String> = [
+        "alles", "aber", "auch", "bist", "bitte", "danke", "dass", "dein", "deine", "dich", "dies", "diese",
+        "dieser", "doch", "eine", "einem", "einen", "einer", "eines", "euch", "euer", "fuer", "ganz", "geht",
+        "gehts", "gute", "guten", "habe", "haben", "hallo", "hast", "hier", "ihre", "ihrer", "kann", "klar",
+        "keine", "keiner", "mein", "meine", "meiner", "mich", "nicht", "noch", "okay", "passt", "prima",
+        "schon", "sehr", "seid", "sein", "seine", "sich", "sind", "super", "ueber", "und", "viel", "viele",
+        "vom", "von", "warum", "wenn", "werde", "wieder", "wird", "wirst", "wohl"
+    ]
 
     static func blocks(from text: String) -> [AnswerBlock] {
         let cleaned = withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
