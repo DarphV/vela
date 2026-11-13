@@ -2,8 +2,9 @@
 //  LocalLLMBrain.swift
 //  Vela
 //
-//  On-device Qwen through MLX. Capable phones use Qwen3 4B with thinking
-//  disabled. Tokens stream into the chat bubble; the caller speaks them.
+//  On-device Qwen through MLX. Generation runs at utility priority so the
+//  audio thread can keep its buffers full. A finished sentence is spoken
+//  before the next tokens are produced.
 //
 
 import Foundation
@@ -27,7 +28,7 @@ final class LocalLLMBrain: VelaBrain {
         await streamAnswer(to: question, history: history) { _ in }
     }
 
-    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) -> Void) async -> VelaAnswer {
+    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) async -> Void) async -> VelaAnswer {
         let passages = await knowledge.search(question, limit: 4)
         let prompt = VelaPrompt.user(question: question, history: history, passages: passages, facts: knowledge.facts)
         do {
@@ -35,21 +36,32 @@ final class LocalLLMBrain: VelaBrain {
             let context: [String: any Sendable]? = models.selected.disablesThinking
                 ? ["enable_thinking": false as any Sendable]
                 : nil
-            let session = ChatSession(
-                container,
-                instructions: VelaPrompt.system,
-                generateParameters: GenerateParameters(maxTokens: 420, temperature: 0.6, repetitionPenalty: 1.05),
-                additionalContext: context
-            )
-            var text = ""
-            for try await chunk in session.streamResponse(to: prompt) {
-                text += chunk
-                let visible = VelaPrompt.withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !visible.isEmpty { onUpdate(visible) }
-            }
+            let throttle = models.selected == .smart
+            let text = try await Task.detached(priority: .utility) {
+                MLXMemoryLimits.tightenForGeneration()
+                defer { MLXMemoryLimits.restoreCache() }
+                let session = ChatSession(
+                    container,
+                    instructions: VelaPrompt.system,
+                    generateParameters: GenerateParameters(maxTokens: 420, temperature: 0.6, repetitionPenalty: 1.05),
+                    additionalContext: context
+                )
+                var text = ""
+                for try await chunk in session.streamResponse(to: prompt) {
+                    text += chunk
+                    let visible = VelaPrompt.withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !visible.isEmpty {
+                        await onUpdate(visible)
+                    }
+                    if throttle {
+                        try? await Task.sleep(nanoseconds: 4_000_000)
+                    }
+                }
+                return text
+            }.value
             let visible = VelaPrompt.withoutThinking(text).trimmingCharacters(in: .whitespacesAndNewlines)
             let shown = visible.isEmpty ? "Dazu kann ich gerade nichts Sicheres sagen." : visible
-            if visible.isEmpty { onUpdate(shown) }
+            if visible.isEmpty { await onUpdate(shown) }
             return VelaAnswer(
                 blocks: VelaPrompt.blocks(from: shown),
                 spoken: VelaPrompt.spoken(from: shown),
@@ -58,7 +70,7 @@ final class LocalLLMBrain: VelaBrain {
             )
         } catch {
             let message = "Das lokale Modell konnte gerade nicht antworten. \(error.localizedDescription)"
-            onUpdate(message)
+            await onUpdate(message)
             return VelaAnswer(blocks: [.paragraph(message)], spoken: "Das lokale Modell konnte gerade nicht antworten.", sources: [], isDemo: false)
         }
     }

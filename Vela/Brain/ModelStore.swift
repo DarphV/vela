@@ -34,16 +34,28 @@ enum ModelStoreError: LocalizedError {
 enum MLXMemoryLimits {
     /// Keep MLX from holding a huge GPU cache beside the Metal nebula.
     /// The cap grows with the selected model, and never past about 45% of RAM.
+    static let restingCacheBytes = 8 * 1024 * 1024
+    static let generationCacheBytes = 4 * 1024 * 1024
+
     static func apply(for kind: VelaModelKind) {
-        GPU.set(cacheLimit: 16 * 1024 * 1024)
+        GPU.set(cacheLimit: restingCacheBytes)
         let physical = Int(ProcessInfo.processInfo.physicalMemory)
         let headroom = max(900 * 1024 * 1024, physical * 45 / 100)
         GPU.set(memoryLimit: min(kind.memoryLimitBytes, headroom), relaxed: true)
     }
 
+    /// A smaller cache while tokens are produced, so the GPU is not full of leftover activations.
+    static func tightenForGeneration() {
+        GPU.set(cacheLimit: generationCacheBytes)
+    }
+
+    static func restoreCache() {
+        GPU.set(cacheLimit: restingCacheBytes)
+    }
+
     static func releaseCache() {
         GPU.set(cacheLimit: 0)
-        GPU.set(cacheLimit: 16 * 1024 * 1024)
+        GPU.set(cacheLimit: restingCacheBytes)
     }
 }
 

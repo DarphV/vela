@@ -66,6 +66,13 @@ final class VisualDriver {
     var reduceMotion = false
     /// While the language model is moving onto the GPU, the visual stays cheap.
     var heavyWork = false
+    /// True while a reply is being generated or spoken.
+    var presenting = false
+    /// Low Power Mode, or a warm thermal state.
+    var conservePower = false
+
+    /// Drops resolution, frame rate, particles and bloom so audio and the model can breathe.
+    var economy: Bool { heavyWork || presenting || conservePower }
     /// Returns the current microphone level 0...1 (read every frame while listening).
     var levelProvider: (() -> Float)?
 

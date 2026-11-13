@@ -93,6 +93,7 @@ final class SpeechListener {
     func start(hints: [String] = []) throws {
         if isRunning { return }
         stopRecognition()
+        releaseEngineForSessionChange()
         switch AVAudioApplication.shared.recordPermission {
         case .granted:
             break
@@ -103,7 +104,7 @@ final class SpeechListener {
         @unknown default:
             throw ListenerError.microphoneDenied
         }
-        guard AudioSessionManager.activate() else { throw ListenerError.sessionFailed }
+        guard AudioSessionManager.activateListening() else { throw ListenerError.sessionFailed }
         guard let recognizer, recognizer.isAvailable else { throw ListenerError.recognizerUnavailable }
 
         var lastError: Error = ListenerError.noMicrophone
@@ -190,21 +191,40 @@ final class SpeechListener {
         setLevel(0)
     }
 
-    /// Schedules synthesized speech on the same engine the mic uses, so voice processing can cancel the echo.
+    /// Stops the microphone graph so playback can leave voiceChat.
+    /// Does not touch the recognition permission or the exception catcher.
+    func suspendInputForPlayback() {
+        stopRecognition()
+        releaseEngineForSessionChange()
+    }
+
+    /// Plays already-synthesized speech. The microphone stays off, voice processing stays off,
+    /// and every buffer is in the engine's format before it is scheduled.
+    @discardableResult
+    func playPrepared(_ buffers: [AVAudioPCMBuffer], played: @escaping () -> Void) -> Int {
+        suspendInputForPlayback()
+        guard AudioSessionManager.activateSpeaking() else { return 0 }
+        do { try connectPlayer(format: AudioSessionManager.outputFormat) } catch { return 0 }
+        guard playbackFormat != nil else { return 0 }
+        if VelaAudioEnginePrepare(engine) != nil { return 0 }
+        if !engine.isRunning, VelaAudioEngineStart(engine) != nil { return 0 }
+        if !player.isPlaying { player.play() }
+        var scheduled = 0
+        for buffer in buffers {
+            guard let playable = convert(buffer, to: playbackFormat), playable.frameLength > 0 else { continue }
+            notePlaybackLevel(Self.rmsLevel(playable))
+            player.scheduleBuffer(playable, completionCallbackType: .dataPlayedBack) { _ in
+                played()
+            }
+            scheduled += 1
+        }
+        return scheduled
+    }
+
+    /// Schedules one buffer. Playback uses the speaking session, not voiceChat.
     @discardableResult
     func scheduleSpeech(_ buffer: AVAudioPCMBuffer, played: @escaping () -> Void) -> Bool {
-        do { try connectPlayer() } catch { return false }
-        guard let playable = convert(buffer, to: playbackFormat), playable.frameLength > 0 else { return false }
-        if !engine.isRunning {
-            if VelaAudioEnginePrepare(engine) != nil { return false }
-            if VelaAudioEngineStart(engine) != nil { return false }
-        }
-        if !player.isPlaying { player.play() }
-        notePlaybackLevel(Self.rmsLevel(buffer))
-        player.scheduleBuffer(playable, completionCallbackType: .dataPlayedBack) { _ in
-            played()
-        }
-        return true
+        playPrepared([buffer], played: played) > 0
     }
 
     func stopSpeechPlayback() {
@@ -241,14 +261,43 @@ final class SpeechListener {
         levelLock.unlock()
     }
 
+    /// Stops the graph and detaches the player so the next session can pick its own format.
+    /// Voice processing is turned off. The microphone start path turns it back on itself.
+    private func releaseEngineForSessionChange() {
+        if engine.isRunning { engine.stop() }
+        if playerReady {
+            player.stop()
+            engine.disconnectNodeOutput(player)
+            engine.detach(player)
+            playerReady = false
+            playbackFormat = nil
+        }
+        _ = VelaSetVoiceProcessing(engine, false)
+        voiceProcessingArmed = false
+    }
+
     private func connectPlayer() throws {
-        guard !playerReady else { return }
+        let mixer = engine.mainMixerNode.outputFormat(forBus: 0)
+        let format: AVAudioFormat? = (mixer.sampleRate > 0 && mixer.channelCount > 0) ? mixer : AudioSessionManager.outputFormat
+        try connectPlayer(format: format)
+    }
+
+    private func connectPlayer(format explicit: AVAudioFormat?) throws {
+        let usable = explicit ?? AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)
+        guard let usable, usable.sampleRate > 0, usable.channelCount > 0 else { throw ListenerError.sessionFailed }
+        if playerReady,
+           playbackFormat?.sampleRate == usable.sampleRate,
+           playbackFormat?.channelCount == usable.channelCount {
+            return
+        }
+        if playerReady {
+            if engine.isRunning { engine.stop() }
+            player.stop()
+            engine.disconnectNodeOutput(player)
+            engine.detach(player)
+            playerReady = false
+        }
         engine.attach(player)
-        let format = engine.mainMixerNode.outputFormat(forBus: 0)
-        let usable = (format.sampleRate > 0 && format.channelCount > 0)
-            ? format
-            : AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)
-        guard let usable else { throw ListenerError.sessionFailed }
         playbackFormat = usable
         engine.connect(player, to: engine.mainMixerNode, format: usable)
         playerReady = true

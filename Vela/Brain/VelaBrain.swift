@@ -19,13 +19,13 @@ protocol VelaBrain: AnyObject {
     func answer(to question: String, history: [ChatMessage]) async -> VelaAnswer
 
     /// Streams the visible text into `onUpdate` (the whole answer so far, not a single token).
-    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) -> Void) async -> VelaAnswer
+    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) async -> Void) async -> VelaAnswer
 }
 
 extension VelaBrain {
-    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) -> Void) async -> VelaAnswer {
+    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) async -> Void) async -> VelaAnswer {
         let answer = await answer(to: question, history: history)
-        onUpdate(VelaPrompt.joined(answer))
+        await onUpdate(VelaPrompt.joined(answer))
         return answer
     }
 }

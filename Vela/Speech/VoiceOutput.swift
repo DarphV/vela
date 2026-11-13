@@ -11,8 +11,37 @@
 import AVFoundation
 import Foundation
 
-private final class WriteProgress {
-    var buffers = 0
+private final class SynthBox {
+    private let lock = NSLock()
+    private var chunks: [AVAudioPCMBuffer] = []
+    private var done = false
+    var onFirst: (([AVAudioPCMBuffer]) -> Void)?
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        if !done { chunks.append(buffer) }
+        lock.unlock()
+    }
+
+    var buffers: [AVAudioPCMBuffer] {
+        lock.lock()
+        let copy = chunks
+        lock.unlock()
+        return copy
+    }
+
+    func finish(_ buffers: [AVAudioPCMBuffer]) {
+        lock.lock()
+        if done {
+            lock.unlock()
+            return
+        }
+        done = true
+        let callback = onFirst
+        onFirst = nil
+        lock.unlock()
+        callback?(buffers)
+    }
 }
 
 final class VoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
@@ -24,11 +53,15 @@ final class VoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
     weak var playback: SpeechListener?
 
     private let synthesizer = AVSpeechSynthesizer()
+    private let audioQueue = DispatchQueue(label: "de.barczewski.vela.speech", qos: .userInteractive)
     private var epoch = 0
     private var pending = 0
     private var openWrites = 0
     private var epochs: [ObjectIdentifier: Int] = [:]
     private var bufferPathFailed = false
+    private var chain: Task<Void, Never> = Task {}
+    private let synthLock = NSLock()
+    private var synthFinish: (([AVAudioPCMBuffer]) -> Void)?
     private let levelLock = NSLock()
     private var level: Float = 0
     private var levelAt = Date.distantPast
@@ -50,56 +83,105 @@ final class VoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
         let value = level
         let stamp = levelAt
         levelLock.unlock()
-        if Date().timeIntervalSince(stamp) > 0.12 { return 0 }
+        if Date().timeIntervalSince(stamp) > 0.25 { return 0 }
         return value
     }
 
     /// Replaces anything currently spoken. Used for the voice preview.
     func speak(_ text: String, voiceID: String) {
         stop()
-        enqueue(text, voiceID: voiceID)
+        Task { await playSentence(text, voiceID: voiceID) }
     }
 
-    /// Queues the next phrase. Synthesis of this chunk runs while the previous one is still playing.
-    func enqueue(_ text: String, voiceID: String) {
+    /// Speaks one finished sentence: synthesize the whole line, then schedule the buffers.
+    /// Sentences wait their turn, so synthesis never overlaps the previous sentence's synthesis.
+    func playSentence(_ text: String, voiceID: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let previous = chain
+        let task = Task { @MainActor [weak self] in
+            await previous.value
+            await self?.performSentence(trimmed, voiceID: voiceID)
+        }
+        chain = task
+        await task.value
+    }
+
+    /// Queues a sentence without waiting. Prefer `playSentence` when generation must pause first.
+    func enqueue(_ text: String, voiceID: String) {
+        Task { await playSentence(text, voiceID: voiceID) }
+    }
+
+    private func performSentence(_ text: String, voiceID: String) async {
         if bufferPathFailed {
-            enqueueUtterance(makeUtterance(trimmed, voiceID: voiceID))
+            enqueueUtterance(makeUtterance(text, voiceID: voiceID))
             return
         }
         let token = epoch
         openWrites += 1
-        let utterance = makeUtterance(trimmed, voiceID: voiceID)
-        let produced = WriteProgress()
-        synthesizer.write(utterance) { [weak self] buffer in
-            guard let self, token == self.epoch else { return }
-            if let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 {
-                produced.buffers += 1
-                let level = Self.level(of: pcm)
-                DispatchQueue.main.async {
-                    guard token == self.epoch else { return }
-                    self.rememberLevel(level)
-                    let played: () -> Void = {
-                        DispatchQueue.main.async { self.bufferPlayed(token: token) }
-                    }
-                    if self.playback?.scheduleSpeech(pcm, played: played) == true {
-                        self.pending += 1
-                        self.onStart?()
-                    } else if produced.buffers == 1 {
-                        self.failBuffers(token: token, text: trimmed, voiceID: voiceID)
-                    }
+        onStart?()
+        let pieces = await collectBuffers(text, voiceID: voiceID, token: token)
+        guard token == epoch else {
+            openWrites = max(0, openWrites - 1)
+            return
+        }
+        openWrites = max(0, openWrites - 1)
+        guard !pieces.isEmpty, let merged = Self.merge(pieces) else {
+            failBuffers(token: token, text: text, voiceID: voiceID)
+            return
+        }
+        rememberLevel(Self.level(of: merged))
+        let slices = Self.slices(of: merged, frames: 9_600)
+        let played: () -> Void = { [weak self] in
+            DispatchQueue.main.async { self?.bufferPlayed(token: token) }
+        }
+        let scheduled = await schedule(slices, played: played)
+        guard token == epoch else { return }
+        if scheduled == 0 {
+            failBuffers(token: token, text: text, voiceID: voiceID)
+        } else {
+            pending += scheduled
+        }
+    }
+
+    /// Collects every PCM buffer for the sentence before anything is scheduled.
+    private func collectBuffers(_ text: String, voiceID: String, token: Int) async -> [AVAudioPCMBuffer] {
+        let utterance = makeUtterance(text, voiceID: voiceID)
+        return await withCheckedContinuation { continuation in
+            let box = SynthBox()
+            box.onFirst = { buffers in
+                continuation.resume(returning: buffers)
+            }
+            synthLock.lock()
+            synthFinish = { buffers in
+                box.finish(buffers)
+            }
+            synthLock.unlock()
+            synthesizer.write(utterance) { [weak self] buffer in
+                guard let self else {
+                    box.finish([])
+                    return
                 }
-            } else {
-                DispatchQueue.main.async {
-                    guard token == self.epoch else { return }
-                    self.openWrites = max(0, self.openWrites - 1)
-                    if produced.buffers == 0 {
-                        self.failBuffers(token: token, text: trimmed, voiceID: voiceID)
+                self.audioQueue.async {
+                    guard token == self.epoch else {
+                        box.finish([])
+                        return
+                    }
+                    if let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0, let copy = Self.copy(pcm) {
+                        box.append(copy)
                     } else {
-                        self.finishIfIdle(token: token, cancelled: false)
+                        box.finish(box.buffers)
                     }
                 }
+            }
+        }
+    }
+
+    private func schedule(_ buffers: [AVAudioPCMBuffer], played: @escaping () -> Void) async -> Int {
+        await withCheckedContinuation { continuation in
+            audioQueue.async { [weak self] in
+                let count = self?.playback?.playPrepared(buffers, played: played) ?? 0
+                continuation.resume(returning: count)
             }
         }
     }
@@ -110,6 +192,11 @@ final class VoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
         openWrites = 0
         epochs.removeAll()
         rememberLevel(0)
+        synthLock.lock()
+        let finish = synthFinish
+        synthFinish = nil
+        synthLock.unlock()
+        finish?([])
         playback?.stopSpeechPlayback()
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
@@ -223,6 +310,69 @@ final class VoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
         level = value
         levelAt = Date()
         levelLock.unlock()
+    }
+
+    private static func copy(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else { return nil }
+        copy.frameLength = buffer.frameLength
+        let frames = Int(buffer.frameLength)
+        let channels = Int(buffer.format.channelCount)
+        if let source = buffer.floatChannelData, let destination = copy.floatChannelData {
+            for channel in 0..<channels {
+                destination[channel].update(from: source[channel], count: frames)
+            }
+            return copy
+        }
+        if let source = buffer.int16ChannelData, let destination = copy.int16ChannelData {
+            for channel in 0..<channels {
+                destination[channel].update(from: source[channel], count: frames)
+            }
+            return copy
+        }
+        return nil
+    }
+
+    private static func merge(_ buffers: [AVAudioPCMBuffer]) -> AVAudioPCMBuffer? {
+        guard let first = buffers.first else { return nil }
+        let frames = buffers.reduce(0) { $0 + Int($1.frameLength) }
+        guard frames > 0, let merged = AVAudioPCMBuffer(pcmFormat: first.format, frameCapacity: AVAudioFrameCount(frames)) else { return nil }
+        merged.frameLength = AVAudioFrameCount(frames)
+        guard let destination = merged.floatChannelData else { return buffers.count == 1 ? first : nil }
+        var offset = 0
+        let channels = Int(first.format.channelCount)
+        for buffer in buffers {
+            guard buffer.format.sampleRate == first.format.sampleRate,
+                  buffer.format.channelCount == first.format.channelCount,
+                  let source = buffer.floatChannelData else { continue }
+            let count = Int(buffer.frameLength)
+            for channel in 0..<channels {
+                destination[channel].advanced(by: offset).update(from: source[channel], count: count)
+            }
+            offset += count
+        }
+        merged.frameLength = AVAudioFrameCount(offset)
+        return merged.frameLength > 0 ? merged : nil
+    }
+
+    /// Several scheduled buffers, so the player is not waiting on the next synthesis.
+    private static func slices(of buffer: AVAudioPCMBuffer, frames: Int) -> [AVAudioPCMBuffer] {
+        let total = Int(buffer.frameLength)
+        guard total > frames, let source = buffer.floatChannelData else { return [buffer] }
+        var slices: [AVAudioPCMBuffer] = []
+        let channels = Int(buffer.format.channelCount)
+        var offset = 0
+        while offset < total {
+            let count = min(frames, total - offset)
+            guard let slice = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: AVAudioFrameCount(count)),
+                  let destination = slice.floatChannelData else { break }
+            slice.frameLength = AVAudioFrameCount(count)
+            for channel in 0..<channels {
+                destination[channel].update(from: source[channel].advanced(by: offset), count: count)
+            }
+            slices.append(slice)
+            offset += count
+        }
+        return slices.isEmpty ? [buffer] : slices
     }
 
     private static func level(of buffer: AVAudioPCMBuffer) -> Float {

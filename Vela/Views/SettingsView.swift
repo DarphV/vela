@@ -176,6 +176,15 @@ struct SettingsView: View {
         }
     }
 
+    private func modelSubtitle(for kind: VelaModelKind) -> String {
+        let line = model.models.statusLine(for: kind)
+        let warm = ProcessInfo.processInfo.thermalState == .serious || ProcessInfo.processInfo.thermalState == .critical
+        if kind == .fast, warm, model.models.selected == .smart {
+            return line + " · empfohlen, das iPhone ist warm"
+        }
+        return line
+    }
+
     private var footer: String {
         switch VelaEngineKind(rawValue: engine) ?? .local {
         case .local where model.models.isInstalled:
@@ -213,7 +222,7 @@ struct SettingsView: View {
                     if index > 0 {
                         Divider().overlay(Color.white.opacity(0.07))
                     }
-                    VoiceRow(title: kind.title, subtitle: model.models.statusLine(for: kind),
+                    VoiceRow(title: kind.title, subtitle: modelSubtitle(for: kind),
                              selected: model.models.selected == kind) {
                         model.models.select(kind)
                     }

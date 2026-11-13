@@ -63,10 +63,10 @@ final class VelaEngine: VelaBrain {
         await streamAnswer(to: question, history: history) { _ in }
     }
 
-    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) -> Void) async -> VelaAnswer {
+    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) async -> Void) async -> VelaAnswer {
         if let action = MacToolRouter.match(question) {
             let text = await performMac?(action) ?? "Der Mac ist nicht verbunden."
-            onUpdate(text)
+            await onUpdate(text)
             return VelaAnswer(blocks: [.paragraph(text)], spoken: text, sources: [], isDemo: false)
         }
         if resolved == .local && !models.safeMode {
@@ -89,7 +89,7 @@ final class VelaEngine: VelaBrain {
         let answer = await brain.streamAnswer(to: question, history: history, onUpdate: onUpdate)
         guard needsHint else { return answer }
         let hinted = withHint(answer)
-        onUpdate(VelaPrompt.joined(hinted))
+        await onUpdate(VelaPrompt.joined(hinted))
         return hinted
     }
 

@@ -47,10 +47,9 @@ final class AppModel: ObservableObject {
     private var toastTask: Task<Void, Never>?
     private var restartFailures = 0
     private var spokenPrefix = ""
-    private var speechStarted = false
-    private var speechArmedAt: Date?
     private var replyToken = 0
     private var replyFinished = false
+    private var suggestedSmallerModel = false
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
@@ -82,7 +81,17 @@ final class AppModel: ObservableObject {
         }
         models.onHeavyWork = { [weak self] busy in
             self?.driver.heavyWork = busy
+            self?.objectWillChange.send()
         }
+        refreshPowerBudget()
+        NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshPowerBudget() }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: Notification.Name.NSProcessInfoPowerStateDidChange)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshPowerBudget() }
+            .store(in: &cancellables)
 
         store.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.objectWillChange.send() }
@@ -130,15 +139,26 @@ final class AppModel: ObservableObject {
         guard s != state else { return }
         state = s
         driver.state = s
+        driver.presenting = s == .thinking || s == .speaking
     }
 
-    func showToast(_ text: String) {
+    func showToast(_ text: String, seconds: Double = 2.4) {
         toast = text
         toastTask?.cancel()
         toastTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(2400))
+            try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             self?.toast = nil
+        }
+    }
+
+    private func refreshPowerBudget() {
+        let thermal = ProcessInfo.processInfo.thermalState
+        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+        driver.conservePower = lowPower || thermal == .fair || thermal == .serious || thermal == .critical
+        if models.selected == .smart, thermal == .serious || thermal == .critical, !suggestedSmallerModel {
+            suggestedSmallerModel = true
+            showToast("Das iPhone ist warm. „1.5B schnell“ in den Einstellungen läuft flüssiger.", seconds: 6)
         }
     }
 
@@ -344,10 +364,6 @@ final class AppModel: ObservableObject {
 
     private func handleRecognitionEnded(_ error: Error?) {
         if mode == .voice, state == .speaking || state == .thinking {
-            Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(180))
-                self?.startListening(duringSpeech: true)
-            }
             return
         }
         guard mode == .voice, state == .listening else { return }
@@ -386,8 +402,6 @@ final class AppModel: ObservableObject {
         replyToken += 1
         voice.stop()
         spokenPrefix = ""
-        speechStarted = false
-        speechArmedAt = nil
         replyFinished = true
         heardText = heard
         setState(.listening)
@@ -418,9 +432,8 @@ final class AppModel: ObservableObject {
         replyToken += 1
         let token = replyToken
         voice.stop()
+        stopListening()
         spokenPrefix = ""
-        speechStarted = false
-        speechArmedAt = nil
         replyFinished = false
         knowledge.rememberIfPersonal(question)
         messages.append(.user(question))
@@ -429,7 +442,7 @@ final class AppModel: ObservableObject {
             isTyping = true
         }
         setState(.thinking)
-        if fromVoice { startListening(duringSpeech: true) }
+        refreshPowerBudget()
         var messageID: UUID?
         let answer = await brain.streamAnswer(to: question, history: messages) { [weak self] text in
             guard let self, token == self.replyToken else { return }
@@ -445,7 +458,7 @@ final class AppModel: ObservableObject {
                 self.messages[index].answer = VelaAnswer(blocks: [.paragraph(text)], spoken: text, sources: [], isDemo: false)
             }
             self.streamRevision += 1
-            self.feedSpeech(text, flush: false)
+            await self.feedSpeech(text, flush: false)
         }
         guard token == replyToken else { return }
         isTyping = false
@@ -456,59 +469,43 @@ final class AppModel: ObservableObject {
             messages.append(.assistant(answer))
         }
         streamRevision += 1
-        feedSpeech(VelaPrompt.joined(answer), flush: true)
+        await feedSpeech(VelaPrompt.joined(answer), flush: true)
         replyFinished = true
         if !VelaSettings.ttsEnabled || !voice.hasPending {
             speechFinished(cancelled: false)
         }
     }
 
-    /// First phrase starts at a clause, ~160 characters, or 600 ms — whichever comes first.
-    /// Later phrases are merged when they are short and queued before the current one ends.
-    private func feedSpeech(_ full: String, flush: Bool) {
+    /// Speaks one finished sentence at a time. Synthesis finishes before the next
+    /// sentence is generated, and the microphone stays off while the buffers play.
+    private func feedSpeech(_ full: String, flush: Bool) async {
         guard VelaSettings.ttsEnabled else { return }
+        let token = replyToken
         let spoken = VelaPrompt.spoken(from: full)
         guard spoken.hasPrefix(spokenPrefix) else { return }
-        if speechArmedAt == nil, spoken.count > spokenPrefix.count { speechArmedAt = Date() }
         var rest = String(spoken.dropFirst(spokenPrefix.count))
-        while let taken = takeSpeechChunk(from: rest, first: !speechStarted, flush: flush) {
+        while let taken = takeSpeechChunk(from: rest, flush: flush) {
+            guard token == replyToken else { return }
             let chunk = taken.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !chunk.isEmpty else { break }
-            AudioSessionManager.activate()
-            voice.enqueue(chunk, voiceID: VelaSettings.voiceID)
-            if mode == .voice { startListening(duringSpeech: true) }
             setState(.speaking)
-            speechStarted = true
+            await voice.playSentence(chunk, voiceID: VelaSettings.voiceID)
+            guard token == replyToken else { return }
             spokenPrefix += taken.raw
             rest = String(rest.dropFirst(taken.raw.count))
         }
     }
 
-    private func takeSpeechChunk(from rest: String, first: Bool, flush: Bool) -> (text: String, raw: String)? {
+    private func takeSpeechChunk(from rest: String, flush: Bool) -> (text: String, raw: String)? {
         let lead = rest.prefix { $0.isWhitespace }.count
         let body = String(rest.dropFirst(lead))
         guard !body.isEmpty else { return nil }
-        let elapsed = speechArmedAt.map { Date().timeIntervalSince($0) } ?? 0
-        let sentences = sentenceSpans(in: body)
-        let clause = clauseSpan(in: body)
         let cut: Int
-        if first {
-            if sentences >= 2 || body.count >= 160 || (clause != nil && body.count >= 48) || (elapsed >= 0.6 && body.count >= 16) || (flush && body.count >= 8) {
-                if sentences >= 1, let end = lastBoundary(in: body, max: min(body.count, 200), min: 12) {
-                    cut = end
-                } else if let end = lastBoundary(in: body, max: min(body.count, 200), min: 8) {
-                    cut = end
-                } else if elapsed >= 0.6 || flush {
-                    cut = min(body.count, 200)
-                } else {
-                    return nil
-                }
-            } else {
-                return nil
-            }
-        } else if flush {
+        if flush {
             cut = body.count
-        } else if let end = lastBoundary(in: body, max: 180, min: 36) {
+        } else if let end = sentenceCut(in: body) {
+            cut = end
+        } else if body.count >= 240, let end = lastBoundary(in: body, max: 240, min: 80) {
             cut = end
         } else {
             return nil
@@ -518,23 +515,18 @@ final class AppModel: ObservableObject {
         return (text, String(rest.prefix(rawCount)))
     }
 
-    private func sentenceSpans(in text: String) -> Int {
+    /// End of the first complete sentence, including its closing mark.
+    private func sentenceCut(in text: String) -> Int? {
         var count = 0
         var index = text.startIndex
         while index < text.endIndex {
-            if ".!?…".contains(text[index]) { count += 1 }
-            index = text.index(after: index)
-        }
-        return count
-    }
-
-    private func clauseSpan(in text: String) -> String.Index? {
-        var index = text.startIndex
-        var seen = 0
-        while index < text.endIndex {
-            if seen > 24, ",;:".contains(text[index]) { return index }
-            seen += 1
-            index = text.index(after: index)
+            count += 1
+            let mark = text[index]
+            let next = text.index(after: index)
+            if ".!?…".contains(mark), count >= 8, next == text.endIndex || text[next].isWhitespace || text[next].isNewline {
+                return count
+            }
+            index = next
         }
         return nil
     }

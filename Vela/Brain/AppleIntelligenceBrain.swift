@@ -56,7 +56,7 @@ final class AppleIntelligenceBrain: VelaBrain {
         await streamAnswer(to: question, history: history) { _ in }
     }
 
-    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) -> Void) async -> VelaAnswer {
+    func streamAnswer(to question: String, history: [ChatMessage], onUpdate: @escaping @MainActor (String) async -> Void) async -> VelaAnswer {
         let passages = await knowledge.search(question, limit: 4)
         let prompt = VelaPrompt.user(question: question, history: history, passages: passages, facts: knowledge.facts)
         #if canImport(FoundationModels)
@@ -65,17 +65,17 @@ final class AppleIntelligenceBrain: VelaBrain {
                 let text = try await AppleStream.generate(prompt: prompt, onUpdate: onUpdate)
                 let visible = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 let shown = visible.isEmpty ? "Dazu kann ich gerade nichts Sicheres sagen." : visible
-                if visible.isEmpty { onUpdate(shown) }
+                if visible.isEmpty { await onUpdate(shown) }
                 return VelaAnswer(blocks: VelaPrompt.blocks(from: shown), spoken: VelaPrompt.spoken(from: shown), sources: passages.map(\.source), isDemo: false)
             } catch {
                 let message = "Apple Intelligence konnte gerade nicht antworten."
-                onUpdate(message)
+                await onUpdate(message)
                 return VelaAnswer(blocks: [.paragraph(message)], spoken: message, sources: [], isDemo: false)
             }
         }
         #endif
         let message = "Apple Intelligence ist auf diesem iPhone nicht bereit."
-        onUpdate(message)
+        await onUpdate(message)
         return VelaAnswer(blocks: [.paragraph(message)], spoken: message, sources: [], isDemo: false)
     }
 }
@@ -83,7 +83,7 @@ final class AppleIntelligenceBrain: VelaBrain {
 #if canImport(FoundationModels)
 @available(iOS 26.0, *)
 private enum AppleStream {
-    static func generate(prompt: String, onUpdate: @MainActor (String) -> Void) async throws -> String {
+    static func generate(prompt: String, onUpdate: @MainActor (String) async -> Void) async throws -> String {
         let session = LanguageModelSession(instructions: VelaPrompt.system)
         let stream = session.streamResponse(to: prompt)
         var latest = ""

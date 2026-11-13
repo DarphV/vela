@@ -44,7 +44,7 @@ struct VelaMetalView: UIViewRepresentable {
         // Prototype caps the device pixel ratio at 2; saves a lot of GPU on 3x screens.
         view.contentScaleFactor = 2
         view.isUserInteractionEnabled = false
-        view.preferredFramesPerSecond = preferredFPS
+        view.preferredFramesPerSecond = driver.economy ? 24 : preferredFPS
 
         if let gpu = VelaGPU.shared {
             let renderer = VelaRenderer(gpu: gpu, driver: driver)
@@ -61,11 +61,15 @@ struct VelaMetalView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
-        if driver.heavyWork {
+        let economy = driver.economy && !driver.isStatic
+        let fps = economy ? 24 : preferredFPS
+        if view.preferredFramesPerSecond != fps {
+            view.preferredFramesPerSecond = fps
+        }
+        if economy {
             if view.contentScaleFactor != 1 { view.contentScaleFactor = 1 }
-            if view.preferredFramesPerSecond != 15 { view.preferredFramesPerSecond = 15 }
-        } else if view.preferredFramesPerSecond != preferredFPS {
-            view.preferredFramesPerSecond = preferredFPS
+        } else if view.contentScaleFactor <= 1.01 {
+            view.contentScaleFactor = 2
         }
         if driver.isStatic {
             view.setNeedsDisplay()

@@ -151,7 +151,11 @@ final class VelaRenderer: NSObject, MTKViewDelegate {
         lastTime = now
 
         if !driver.isStatic {
-            adaptResolution(view: view, dt: rawDt)
+            if driver.economy {
+                if view.contentScaleFactor > 1.05 { view.contentScaleFactor = 1 }
+            } else {
+                adaptResolution(view: view, dt: rawDt)
+            }
         }
 
         let size = view.drawableSize
@@ -185,14 +189,18 @@ final class VelaRenderer: NSObject, MTKViewDelegate {
         encoder.setRenderPipelineState(gpu.pointPipeline)
         encoder.setVertexBuffer(gpu.particles, offset: 0, index: 0)
         encoder.setVertexBytes(&u, length: length, index: 1)
-        let count = design == 0 ? min(VelaGPU.particleCount, 1100) : VelaGPU.particleCount
+        let count = particleCount(design: design)
         encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: count)
         encoder.endEncoding()
 
-        // Bright parts, then a separable blur, then ACES + dither onto the screen.
-        fullscreen(commandBuffer, pipeline: gpu.thresholdPipeline, source: scene, target: bloomA, direction: nil)
-        fullscreen(commandBuffer, pipeline: gpu.blurPipeline, source: bloomA, target: bloomB, direction: SIMD2<Float>(1, 0))
-        fullscreen(commandBuffer, pipeline: gpu.blurPipeline, source: bloomB, target: bloomA, direction: SIMD2<Float>(0, 1))
+        // Bloom is the expensive extra pass. Skip it while the model or the voice is busy.
+        if driver.economy {
+            clear(commandBuffer, bloomA)
+        } else {
+            fullscreen(commandBuffer, pipeline: gpu.thresholdPipeline, source: scene, target: bloomA, direction: nil)
+            fullscreen(commandBuffer, pipeline: gpu.blurPipeline, source: bloomA, target: bloomB, direction: SIMD2<Float>(1, 0))
+            fullscreen(commandBuffer, pipeline: gpu.blurPipeline, source: bloomB, target: bloomA, direction: SIMD2<Float>(0, 1))
+        }
 
         guard let drawablePass = view.currentRenderPassDescriptor,
               let composite = commandBuffer.makeRenderCommandEncoder(descriptor: drawablePass) else { return }
@@ -203,6 +211,21 @@ final class VelaRenderer: NSObject, MTKViewDelegate {
         composite.endEncoding()
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+
+    private func particleCount(design: Int) -> Int {
+        if driver.economy { return 220 }
+        return design == 0 ? min(VelaGPU.particleCount, 1100) : VelaGPU.particleCount
+    }
+
+    private func clear(_ buffer: MTLCommandBuffer, _ texture: MTLTexture) {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        guard let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        encoder.endEncoding()
     }
 
     private func fullscreen(_ buffer: MTLCommandBuffer, pipeline: MTLRenderPipelineState, source: MTLTexture, target: MTLTexture, direction: SIMD2<Float>?) {
