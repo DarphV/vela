@@ -2,10 +2,9 @@
 //  RootView.swift
 //  Vela
 //
-//  Layer stack and geometry 1:1 from the prototype (index.html / app.js layout()):
-//    stars · ambient · Glas-Chat · stage (visual) · avatar ring · voice UI · chips · gear · toast · splash
-//  Stage size S = 1.12 × width, centered at 43 % of the screen height. In chat mode
-//  it shrinks to a 70 pt avatar under the status bar.
+//  Stars, ambient glow, Glas-Chat, the orb, chips, gear, toast and splash.
+//  The splash plays the full visual once. After that the orb is a small soft
+//  avatar under the status bar, in voice mode and in the chat, with no ring.
 //
 
 import SwiftUI
@@ -46,7 +45,9 @@ struct RootView: View {
 
     @State private var stageOpacity: Double = 1
     @State private var topInset: CGFloat = 59
-    @Namespace private var orbSpace
+    /// After the splash, the orb sits at the top and the full-screen Metal view is gone.
+    @State private var orbCompact = false
+    @State private var metalRetired = false
 
     private var isChat: Bool { model.mode == .chat }
     private var modeAnimation: Animation {
@@ -78,8 +79,7 @@ struct RootView: View {
                         }
 
                     stage(L)
-                    travelRing(L)
-                    avatarRing(L)
+                    avatarHitTarget(L)
 
                     header(L)
                         .opacity(isChat ? 1 : 0)
@@ -140,6 +140,21 @@ struct RootView: View {
         .onChange(of: design) { _, newValue in
             switchDesign(to: newValue)
         }
+        .onChange(of: model.showSplash) { _, showing in
+            guard !showing, !orbCompact else { return }
+            if reduceMotion {
+                orbCompact = true
+                metalRetired = true
+                return
+            }
+            withAnimation(.spring(response: 0.85, dampingFraction: 0.88)) {
+                orbCompact = true
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(920))
+                metalRetired = true
+            }
+        }
         .onChange(of: reduceMotion, initial: true) { _, value in
             model.driver.reduceMotion = value
         }
@@ -194,74 +209,36 @@ struct RootView: View {
     // MARK: Stage
 
     private func stage(_ L: StageLayout) -> some View {
-        let scale = isChat ? StageLayout.avatarSize / L.stage : 1
-        let centerY = isChat ? L.avatarCenter : L.centerY
-        return VelaVisual(driver: model.driver, preferredFPS: isChat ? 60 : 120)
-            .frame(width: L.stage, height: L.stage)
-            .clipShape(Circle())
-            .scaleEffect(scale)
-            .position(x: L.width / 2, y: L.y(centerY))
-            .opacity(stageOpacity)
-            .allowsHitTesting(false)
-            .animation(.spring(response: 0.78, dampingFraction: 0.86), value: isChat)
-    }
-
-    /// The stroke travels with the visual. Two views share one identity so the
-    /// shrink into the avatar is a matched geometry spring, while the Metal
-    /// view itself stays alive and only changes frame.
-    private func travelRing(_ L: StageLayout) -> some View {
-        Group {
-            if isChat {
-                ringStroke(StageLayout.avatarSize, bright: true)
-                    .matchedGeometryEffect(id: "velaRing", in: orbSpace)
-                    .position(x: L.width / 2, y: L.y(L.avatarCenter))
+        let compact = isChat || orbCompact
+        let side = compact ? StageLayout.avatarSize : L.stage
+        let centerY = compact ? L.avatarCenter : L.centerY
+        return Group {
+            if metalRetired {
+                SoftOrb(design: design)
             } else {
-                ringStroke(L.stage, bright: false)
-                    .matchedGeometryEffect(id: "velaRing", in: orbSpace)
-                    .position(x: L.width / 2, y: L.y(L.centerY))
+                VelaVisual(driver: model.driver, preferredFPS: 30)
             }
         }
+        .frame(width: side, height: side)
+        .clipShape(Circle())
+        .position(x: L.width / 2, y: L.y(centerY))
+        .opacity(stageOpacity)
         .allowsHitTesting(false)
+        .animation(.spring(response: 0.85, dampingFraction: 0.88), value: compact)
     }
 
-    private func ringStroke(_ side: CGFloat, bright: Bool) -> some View {
-        Circle()
-            .strokeBorder(
-                LinearGradient(colors: [Color.white.opacity(bright ? 0.85 : 0.35), Color.rgba(190, 160, 255, bright ? 0.7 : 0.22)],
-                               startPoint: .top, endPoint: .bottom),
-                lineWidth: bright ? 1.4 : 1
-            )
-            .frame(width: side, height: side)
-    }
-
-    private func avatarRing(_ L: StageLayout) -> some View {
+    /// Invisible tap target over the small orb in the chat. No stroke.
+    private func avatarHitTarget(_ L: StageLayout) -> some View {
         Button {
             model.toVoice()
         } label: {
-            Circle()
-                .fill(
-                    RadialGradient(colors: [Color.white.opacity(0.45), Color.white.opacity(0)],
-                                   center: UnitPoint(x: 0.34, y: 0.26), startRadius: 0, endRadius: 20)
-                )
-                .background(
-                    Circle().fill(RadialGradient(stops: [
-                        .init(color: .clear, location: 0.58),
-                        .init(color: Color.rgba(160, 120, 255, 0.22), location: 0.72),
-                        .init(color: Color.white.opacity(0.08), location: 1)
-                    ], center: .center, startRadius: 0, endRadius: 35))
-                )
-                .overlay(Circle().strokeBorder(Color.rgba(210, 180, 255, 0.55), lineWidth: 1))
-                .shadow(color: Color.rgba(150, 100, 255, 0.65), radius: 9)
-                .shadow(color: Color.rgba(90, 170, 255, 0.35), radius: 23)
+            Color.clear
                 .frame(width: StageLayout.avatarSize, height: StageLayout.avatarSize)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Zurück zum Sprachmodus")
-        .opacity(isChat ? 1 : 0)
-        .scaleEffect(isChat ? 1 : 0.6)
-        .animation(isChat ? .spring(response: 0.6, dampingFraction: 0.6).delay(0.6) : .easeOut(duration: 0.3), value: isChat)
-        .allowsHitTesting(isChat)
+        .allowsHitTesting(isChat && metalRetired)
         .position(x: L.width / 2, y: L.y(L.avatarCenter))
     }
 

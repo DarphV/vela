@@ -83,6 +83,33 @@ struct VelaMetalView: UIViewRepresentable {
     }
 }
 
+/// Soft avatar after the splash. A gradient pulse, with the full-screen Metal view gone.
+struct SoftOrb: View {
+    let design: Int
+    @State private var pulse = false
+
+    var body: some View {
+        FallbackOrb(design: design)
+            .scaleEffect(pulse ? 1.05 : 0.94)
+            .opacity(pulse ? 0.95 : 0.72)
+            .shadow(color: glow.opacity(pulse ? 0.7 : 0.35), radius: pulse ? 18 : 8)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) {
+                    pulse = true
+                }
+            }
+            .accessibilityHidden(true)
+    }
+
+    private var glow: Color {
+        switch design {
+        case 1: return Color.rgba(255, 180, 90)
+        case 2: return Color.rgba(160, 120, 255)
+        default: return Color.rgba(120, 170, 255)
+        }
+    }
+}
+
 /// Simple non-Metal stand-in (prototype: Canvas2D fallback / thumbnail placeholders).
 struct FallbackOrb: View {
     let design: Int

@@ -36,7 +36,6 @@ final class LocalLLMBrain: VelaBrain {
             let context: [String: any Sendable]? = models.selected.disablesThinking
                 ? ["enable_thinking": false as any Sendable]
                 : nil
-            let throttle = models.selected == .smart
             let text = try await Task.detached(priority: .utility) {
                 MLXMemoryLimits.tightenForGeneration()
                 defer { MLXMemoryLimits.restoreCache() }
@@ -53,9 +52,8 @@ final class LocalLLMBrain: VelaBrain {
                     if !visible.isEmpty {
                         await onUpdate(visible)
                     }
-                    if throttle {
-                        try? await Task.sleep(nanoseconds: 4_000_000)
-                    }
+                    // Both models yield so speech buffers are not starved.
+                    try? await Task.sleep(nanoseconds: 3_000_000)
                 }
                 return text
             }.value
